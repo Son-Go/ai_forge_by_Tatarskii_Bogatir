@@ -1,0 +1,23 @@
+services:
+  ml-service:
+    build: ../ml-service
+    environment:
+      ML_SERVICE_TOKEN: ${ML_SERVICE_TOKEN:-}
+      RUNPOD_API_KEY: ${RUNPOD_API_KEY:-}
+      RUNPOD_ENDPOINT_ID: ${RUNPOD_ENDPOINT_ID:-}
+      RUNPOD_MODEL: ${RUNPOD_MODEL:-}
+      RUNPOD_MODEL_VERSION: ${RUNPOD_MODEL_VERSION:-}
+      RUNPOD_MAX_CONCURRENCY: ${RUNPOD_MAX_CONCURRENCY:-1}
+      RUNPOD_RESPONSE_FORMAT: ${RUNPOD_RESPONSE_FORMAT:-prompt}
+      RUNPOD_SEND_CHAT_TEMPLATE_KWARGS: ${RUNPOD_SEND_CHAT_TEMPLATE_KWARGS:-false}
+      ML_MAX_CONTEXT_BYTES: ${ML_MAX_CONTEXT_BYTES:-24000}
+    healthcheck:
+      test:
+        - CMD
+        - .venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).close()"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
