@@ -1,0 +1,7 @@
+.pnpm-store/
+.cache/
+coverage/
+playwright-report/
+test-results/
+*.local
+*.tsbuildinfo
