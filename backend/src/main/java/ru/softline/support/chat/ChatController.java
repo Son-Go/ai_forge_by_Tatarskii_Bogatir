@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.URI;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -30,19 +31,26 @@ class ChatController {
     private static final String COOKIE = "softline_session";
     private final ChatStore store;
     private final ChatFlow flow;
-    private final String origin;
+    private final Set<String> origins;
     private final RateWindow rate = new RateWindow();
 
-    ChatController(ChatStore store, ChatFlow flow, @Value("${chat.public-origin:http://localhost:8080}") String origin) {
-        URI address = URI.create(origin);
-        if (!Set.of("http", "https").contains(address.getScheme()) || address.getHost() == null
-                || address.getUserInfo() != null || !address.getRawPath().isEmpty()
-                || address.getRawQuery() != null || address.getRawFragment() != null) {
-            throw new IllegalArgumentException("chat.public-origin must be an origin without a path");
-        }
+    ChatController(ChatStore store, ChatFlow flow,
+                   @Value("${chat.public-origin:http://localhost:8080}") String publicOrigins) {
         this.store = store;
         this.flow = flow;
-        this.origin = origin;
+        this.origins = Set.copyOf(Arrays.stream(publicOrigins.split(",", -1))
+                .map(String::strip).map(ChatController::validatedOrigin).toList());
+    }
+
+    private static String validatedOrigin(String origin) {
+        URI address = URI.create(origin);
+        String scheme = address.getScheme();
+        if (scheme == null || !Set.of("http", "https").contains(scheme) || address.getHost() == null
+                || address.getUserInfo() != null || !address.getRawPath().isEmpty()
+                || address.getRawQuery() != null || address.getRawFragment() != null) {
+            throw new IllegalArgumentException("chat.public-origin must list HTTP(S) origins without paths");
+        }
+        return origin;
     }
 
     @PostMapping
@@ -99,7 +107,8 @@ class ChatController {
     }
 
     private void requireOrigin(HttpServletRequest request) {
-        if (!origin.equals(request.getHeader(HttpHeaders.ORIGIN))) {
+        String origin = request.getHeader(HttpHeaders.ORIGIN);
+        if (origin == null || !origins.contains(origin)) {
             throw new ChatError(403, "INVALID_ORIGIN", "Источник запроса не разрешён.");
         }
     }
