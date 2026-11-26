@@ -15,25 +15,26 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDType0Font;
 import org.springframework.stereotype.Component;
-import ru.softline.support.chat.ChatTypes.QuoteDraft;
+import ru.softline.support.chat.ChatTypes.DocumentDraft;
+import ru.softline.support.chat.ChatTypes.DraftKind;
 
 @Component
-class QuoteDraftPdf {
+class DocumentDraftPdf {
     private static final float MARGIN = 48;
     private static final float TOP = PDRectangle.A4.getHeight() - MARGIN;
     private static final float WIDTH = PDRectangle.A4.getWidth() - 2 * MARGIN;
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM.uuuu");
     private static final ZoneId MOSCOW = ZoneId.of("Europe/Moscow");
 
-    byte[] render(QuoteDraft draft) throws IOException {
+    byte[] render(DocumentDraft draft, DraftKind kind) throws IOException {
         try (PDDocument document = new PDDocument();
-             InputStream fontFile = QuoteDraftPdf.class.getResourceAsStream("/fonts/DejaVuSans.ttf")) {
-            if (fontFile == null) throw new IOException("Quote font unavailable");
+             InputStream fontFile = DocumentDraftPdf.class.getResourceAsStream("/fonts/DejaVuSans.ttf")) {
+            if (fontFile == null) throw new IOException("Document font unavailable");
             PDType0Font font = PDType0Font.load(document, fontFile);
-            document.getDocumentInformation().setTitle("Черновик коммерческого предложения");
+            document.getDocumentInformation().setTitle(kind.title + " — черновик");
             List<Line> lines = new ArrayList<>();
             add(lines, font, "ЧЕРНОВИК", 14, 12);
-            add(lines, font, "Коммерческое предложение", 22, 18);
+            add(lines, font, kind.title, 22, 18);
             add(lines, font, "Заказчик: " + draft.customerName(), 12, 5);
             add(lines, font, "Дата: " + LocalDate.now(MOSCOW).format(DATE), 12, 24);
             add(lines, font, "Каталожная позиция", 15, 7);
@@ -42,7 +43,7 @@ class QuoteDraftPdf {
             add(lines, font, "Количество позиций: " + draft.quantity(), 12, 6);
             add(lines, font, "Цена за позицию: " + money(draft.unitPrice(), draft.currency()), 12, 10);
             add(lines, font, "Итого: " + money(draft.total(), draft.currency()), 16, 22);
-            add(lines, font, "НДС, условия оплаты, срок поставки и срок действия уточняет менеджер.", 11, 4);
+            add(lines, font, kind.note, 11, 4);
             writePages(document, font, lines);
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             document.save(output);

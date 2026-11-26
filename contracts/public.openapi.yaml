@@ -152,6 +152,33 @@ paths:
         '409': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /api/v1/sessions/{session_id}/invoice-drafts:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      operationId: createInvoiceDraft
+      summary: Сформировать PDF-черновик счёта по сохранённому выбору
+      description: Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Цена и валюта берутся из каталога. При изменении предложения возвращается OFFER_CHANGED, после чего нужно подтвердить новую карточку через selection. Черновик предназначен для согласования, выдаётся без реквизитов оплаты и не сохраняется.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DocumentDraftRequest' }
+      responses:
+        '200':
+          description: PDF-черновик счёта
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /health/live:
     get:
       operationId: liveness
@@ -196,6 +223,8 @@ components:
   schemas:
     Uuid: { type: string, format: uuid }
     QuoteRequest:
+      $ref: '#/components/schemas/DocumentDraftRequest'
+    DocumentDraftRequest:
       type: object
       required: [customer_name, quantity]
       properties:

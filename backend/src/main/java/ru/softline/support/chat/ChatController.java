@@ -32,15 +32,15 @@ class ChatController {
     private static final String COOKIE = "softline_session";
     private final ChatStore store;
     private final ChatFlow flow;
-    private final QuoteDraftPdf quotePdf;
+    private final DocumentDraftPdf draftPdf;
     private final Set<String> origins;
     private final RateWindow rate = new RateWindow();
 
-    ChatController(ChatStore store, ChatFlow flow, QuoteDraftPdf quotePdf,
+    ChatController(ChatStore store, ChatFlow flow, DocumentDraftPdf draftPdf,
                    @Value("${chat.public-origin:http://localhost:8080}") String publicOrigins) {
         this.store = store;
         this.flow = flow;
-        this.quotePdf = quotePdf;
+        this.draftPdf = draftPdf;
         this.origins = Set.copyOf(Arrays.stream(publicOrigins.split(",", -1))
                 .map(String::strip).map(ChatController::validatedOrigin).toList());
     }
@@ -102,14 +102,26 @@ class ChatController {
     }
 
     @PostMapping("/{id}/quote-drafts")
-    ResponseEntity<byte[]> quote(@PathVariable UUID id, @RequestBody(required = false) QuoteRequest input,
+    ResponseEntity<byte[]> quote(@PathVariable UUID id, @RequestBody(required = false) DocumentDraftRequest input,
                                  HttpServletRequest request,
                                  @CookieValue(value = COOKIE, required = false) String token) throws IOException {
+        return draft(id, input, request, token, DraftKind.QUOTE);
+    }
+
+    @PostMapping("/{id}/invoice-drafts")
+    ResponseEntity<byte[]> invoiceDraft(@PathVariable UUID id, @RequestBody(required = false) DocumentDraftRequest input,
+                                        HttpServletRequest request,
+                                        @CookieValue(value = COOKIE, required = false) String token) throws IOException {
+        return draft(id, input, request, token, DraftKind.INVOICE);
+    }
+
+    private ResponseEntity<byte[]> draft(UUID id, DocumentDraftRequest input, HttpServletRequest request,
+                                         String token, DraftKind kind) throws IOException {
         requireOrigin(request);
         rate.take("session:" + id, 30);
-        byte[] pdf = quotePdf.render(store.prepareQuote(id, token, input));
+        byte[] pdf = draftPdf.render(store.prepareDraft(id, token, input, kind), kind);
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_PDF)
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=quote-draft.pdf")
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + kind.fileName)
                 .header(HttpHeaders.CACHE_CONTROL, "no-store").body(pdf);
     }
 

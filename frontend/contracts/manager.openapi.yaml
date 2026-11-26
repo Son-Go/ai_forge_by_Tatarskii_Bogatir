@@ -1,0 +1,158 @@
+openapi: 3.1.0
+info:
+  title: Softline Support Handoffs
+  version: 0.1.0
+  description: Очередь обращений для кабинета менеджера и состояние передачи для клиентского чата.
+security:
+  - managerToken: []
+paths:
+  /api/v1/sessions/{session_id}/handoff:
+    parameters:
+      - $ref: './public.openapi.yaml#/components/parameters/SessionId'
+    get:
+      operationId: readSessionHandoff
+      security:
+        - sessionCookie: []
+      description: Возвращает последнее обращение в собственной сессии. Реплики менеджера приходят в GET сессии с role=assistant и sender=manager. Пока обращение открыто, клиент отправляет уточнения обычным POST messages. Изменения можно опрашивать через GET.
+      responses:
+        '200':
+          description: Статус обращения или null, если его ещё не было
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [handoff]
+                properties:
+                  handoff:
+                    oneOf:
+                      - $ref: '#/components/schemas/Handoff'
+                      - type: 'null'
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs:
+    get:
+      operationId: listHandoffs
+      description: Общая очередь и собственные обращения, сначала активные, затем закрытые. Содержимое диалога доступно после назначения.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Страница очереди
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/QueueItem' }
+        '400': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    get:
+      operationId: readAssignedHandoff
+      responses:
+        '200':
+          description: Назначенное менеджеру обращение с диалогом. В закрытом обращении видна переписка до момента закрытия.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [handoff, messages]
+                properties:
+                  handoff: { $ref: '#/components/schemas/QueueItem' }
+                  messages:
+                    type: array
+                    items: { $ref: '#/components/schemas/ChatMessage' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}/claim:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    post:
+      operationId: claimHandoff
+      description: Назначает свободное обращение текущему менеджеру. Повтор для собственного активного обращения идемпотентен.
+      responses:
+        '200': { $ref: '#/components/responses/QueueItem' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '409': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    post:
+      operationId: replyToHandoff
+      description: Сохраняет ответ своего обращения. Повтор с прежним message_id и тем же text возвращает сохранённую реплику.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_id, text]
+              properties:
+                message_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+                text: { type: string, minLength: 1, maxLength: 4000, pattern: '\S' }
+      responses:
+        '200':
+          description: Сохранённая реплика менеджера с sender=manager
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatMessage' }
+        '400': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '409': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    post:
+      operationId: resolveHandoff
+      description: Закрывает своё обращение. Повтор возвращает сохранённое состояние. Следующий запрос клиента снова обрабатывает ассистент.
+      responses:
+        '200': { $ref: '#/components/responses/QueueItem' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '409': { $ref: './public.openapi.yaml#/components/responses/Error' }
+components:
+  securitySchemes:
+    managerToken: { type: http, scheme: bearer }
+    sessionCookie: { type: apiKey, in: cookie, name: softline_session }
+  parameters:
+    HandoffId:
+      name: handoff_id
+      in: path
+      required: true
+      schema: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+  schemas:
+    ChatMessage:
+      allOf:
+        - $ref: './public.openapi.yaml#/components/schemas/Message'
+        - type: object
+          required: [status]
+          properties:
+            sender: { const: manager, description: Присутствует у ответа менеджера }
+    Handoff:
+      type: object
+      required: [handoff_id, reason, status, created_at]
+      properties:
+        handoff_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+        reason: { enum: [document_review, off_catalog_order] }
+        status: { enum: [queued, in_progress, resolved] }
+        created_at: { type: string, format: date-time }
+    QueueItem:
+      allOf:
+        - $ref: '#/components/schemas/Handoff'
+        - type: object
+          required: [session_id]
+          properties:
+            session_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+  responses:
+    QueueItem:
+      description: Состояние обращения
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/QueueItem' }

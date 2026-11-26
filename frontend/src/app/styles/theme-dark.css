@@ -1,5 +1,5 @@
 /* Local Dark Premium theme. Base light palette and shared geometry stay in tokens.css. */
-:root {
+:root[data-theme="dark"] {
   color-scheme: dark;
   --background: #15141c;
   --background-top: #211a25;
@@ -29,6 +29,8 @@
   --case-waiting-bg: #342630;
   --case-progress-text: #b5c5e5;
   --case-progress-bg: #293245;
+  --case-completed-text: #b7c3ce;
+  --case-completed-bg: #30353d;
   --warning: #f1cf99;
   --warning-soft: #342b20;
   --warning-border: #6b5435;

@@ -88,7 +88,7 @@ export class ChatController {
   }
 
   send = async (text: string) => {
-    if (!text.trim() || this.state.phase !== 'ready' || !this.state.session) return
+    if (!text.trim() || text.trim().length > 4000 || this.state.phase !== 'ready' || !this.state.session) return
     // An unresolved delivery must be reconciled, not replaced by a new ID.
     if (this.state.issue?.action === 'resend') return
     const input = { client_message_id: crypto.randomUUID(), text: text.trim() }
@@ -153,6 +153,17 @@ export class ChatController {
       try { await this.restore(epoch, session.session_id, failure) }
       catch (restoreError) { if (this.current(epoch)) this.loadError(restoreError) }
     }
+  }
+
+  // Background handoff updates never replace an active send/selection or its draft.
+  refreshHistory = async (signal: AbortSignal) => {
+    const id = this.state.session?.session_id
+    if (!id || this.state.phase !== 'ready' || this.state.issue?.action === 'resend') return
+    const epoch = this.epoch
+    const session = await this.api.getSession(id, signal)
+    if (!this.current(epoch) || this.state.phase !== 'ready' || signal.aborted) return
+    if (session.last_turn?.status === 'running') { await this.recover(); return }
+    this.dispatch({ type: 'session', session })
   }
 
   select = async (offer: Offer) => {

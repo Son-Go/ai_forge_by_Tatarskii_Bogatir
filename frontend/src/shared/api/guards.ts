@@ -23,6 +23,7 @@ export function isSource(v: unknown): v is Source {
 export function isMessage(v: unknown): v is Message {
   return object(v) && strings(v, ['id', 'text']) && includes(v.role, ['user', 'assistant'])
     && date(v.created_at) && list(v.cards, isOffer) && list(v.sources, isSource)
+    && (v.sender === undefined || (v.sender === 'manager' && v.role === 'assistant'))
     && (v.status === undefined || includes(v.status, ['streaming', 'complete', 'partial']))
 }
 export function isSession(v: unknown): v is Session {

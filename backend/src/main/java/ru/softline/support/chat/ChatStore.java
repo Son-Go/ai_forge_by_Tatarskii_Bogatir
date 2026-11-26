@@ -49,14 +49,17 @@ class ChatStore {
     private final ObjectMapper json;
     private final CatalogSearch catalog;
     private final boolean quotesEnabled;
+    private final boolean invoiceDraftsEnabled;
     private final SecureRandom random = new SecureRandom();
 
     ChatStore(JdbcClient db, ObjectMapper json, CatalogSearch catalog,
-              @Value("${chat.quotes-enabled:false}") boolean quotesEnabled) {
+              @Value("${chat.quotes-enabled:false}") boolean quotesEnabled,
+              @Value("${chat.invoice-drafts-enabled:false}") boolean invoiceDraftsEnabled) {
         this.db = db;
         this.json = json;
         this.catalog = catalog;
         this.quotesEnabled = quotesEnabled;
+        this.invoiceDraftsEnabled = invoiceDraftsEnabled;
     }
 
     Owner create(String cookie) {
@@ -264,9 +267,14 @@ class ChatStore {
     }
 
     @Transactional(noRollbackFor = ChatError.class)
-    public QuoteDraft prepareQuote(UUID id, String token, QuoteRequest input) {
+    public DocumentDraft prepareDraft(UUID id, String token, DocumentDraftRequest input, DraftKind kind) {
         lockOwner(id, token);
-        if (!quotesEnabled) throw new ChatError(404, "QUOTES_DISABLED", "Черновики КП пока недоступны.");
+        if (kind == DraftKind.QUOTE && !quotesEnabled) {
+            throw new ChatError(404, "QUOTES_DISABLED", "Черновики КП пока недоступны.");
+        }
+        if (kind == DraftKind.INVOICE && !invoiceDraftsEnabled) {
+            throw new ChatError(404, "INVOICE_DRAFTS_DISABLED", "Черновики счёта пока недоступны.");
+        }
         if (input == null || input.customerName() == null || input.customerName().isBlank()
                 || input.customerName().length() > 160 || input.customerName().codePoints()
                         .anyMatch(point -> Character.isISOControl(point) || Character.getType(point) == Character.FORMAT)
@@ -279,14 +287,14 @@ class ChatStore {
         JsonNode selected = db.sql("SELECT selected_card::text FROM chat_sessions WHERE session_id = ?")
                 .param(id).query(String.class).optional().map(this::tree).orElse(null);
         if (selected == null || selected.isNull()) {
-            throw new ChatError(409, "QUOTE_SELECTION_REQUIRED", "Сначала подтвердите предложение из каталога.");
+            throw new ChatError(409, kind.errorCode("SELECTION_REQUIRED"), "Сначала подтвердите предложение из каталога.");
         }
         JsonNode current = revalidateOffer(id, selected);
         JsonNode price = current.path("price");
         if (!price.isObject()) {
-            throw new ChatError(409, "QUOTE_PRICE_UNAVAILABLE", "Для этой позиции менеджер должен подтвердить цену.");
+            throw new ChatError(409, kind.errorCode("PRICE_UNAVAILABLE"), "Для этой позиции менеджер должен подтвердить цену.");
         }
-        return new QuoteDraft(input.customerName().strip(), current.path("name").asText(),
+        return new DocumentDraft(input.customerName().strip(), current.path("name").asText(),
                 current.path("attributes").path("vendor_code").asText(""), input.quantity().intValueExact(),
                 new BigDecimal(price.path("amount").asText()), price.path("currency").asText());
     }

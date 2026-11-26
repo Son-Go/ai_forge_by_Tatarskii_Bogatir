@@ -9,7 +9,9 @@ import type { ChatState } from '../../features/chat/model/chatReducer'
 import type { Message } from '../../shared/api/types'
 import { Icon } from '../../shared/ui/Icon'
 import { DemoBanner, WorkspaceHeader } from '../../shared/ui/WorkspaceHeader'
-import { ChatHandoff } from '../../features/handoff/ChatHandoff'
+import { AutomaticHandoffNotice, type AutomaticHandoffNoticeData } from '../../features/chat/ui/AutomaticHandoffNotice'
+import { useSessionHandoff } from '../../features/handoff/useSessionHandoff'
+import { InvoiceDemo } from '../../features/quote/InvoiceDemo'
 import { QuoteDraftAction } from '../../features/quote/QuoteDraftAction'
 
 const suggestions = [
@@ -19,7 +21,7 @@ const suggestions = [
 ] as const
 const stages = { interpreting: 'Анализируем запрос', searching: 'Ищем в каталоге и базе знаний', generating: 'Готовим ответ' }
 
-export function ChatView({ state, controller, mock = false, embedded = false }: { state: ChatState; controller: ChatController; mock?: boolean; embedded?: boolean }) {
+export function ChatView({ state, controller, mock = false, embedded = false, automaticHandoff, handoffIssue }: { state: ChatState; controller: ChatController; mock?: boolean; embedded?: boolean; automaticHandoff?: AutomaticHandoffNoticeData; handoffIssue?: string }) {
   const [suggestion, setSuggestion] = useState('')
   const [following, setFollowing] = useState(true)
   const [atEnd, setAtEnd] = useState(true)
@@ -28,7 +30,7 @@ export function ChatView({ state, controller, mock = false, embedded = false }: 
   const busy = state.phase !== 'ready' || state.issue?.action === 'resend'
   const messages: Message[] = [...state.session?.messages || []]
   if (state.optimistic && !messages.some((m) => m.id === state.optimistic?.id)) messages.push(state.optimistic)
-  const signature = `${messages.length}:${state.streamText.length}:${state.phase}`
+  const signature = `${messages.length}:${state.streamText.length}:${state.phase}:${automaticHandoff?.title || ''}:${automaticHandoff?.message || ''}`
   useEffect(() => {
     if (following && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight
   }, [signature, following])
@@ -49,10 +51,10 @@ export function ChatView({ state, controller, mock = false, embedded = false }: 
   const selectedInHistory = selected && messages.some((message) => message.cards.some((offer) =>
     selected.offer_id === offer.offer_id && selected.catalog_version === offer.catalog_version))
   function messageNode(message: Message) {
-    return <article className={`message message-${message.role}`} key={message.id} aria-label={message.role === 'user' ? 'Вы' : 'Консультант'}>
+    return <article className={`message message-${message.role}`} key={message.id} aria-label={message.role === 'user' ? 'Вы' : message.sender === 'manager' ? 'Специалист' : 'Консультант'}>
       <span className="message-avatar" aria-hidden="true"><Icon name={message.role === 'user' ? 'user' : 'assistant'} /></span>
       <div className="message-content">
-      <div className="message-author">{message.role === 'user' ? 'Вы' : 'Консультант Softline'}{message.role === 'assistant' && <span className="ai-tag">AI</span>}</div>
+      <div className="message-author">{message.role === 'user' ? 'Вы' : message.sender === 'manager' ? 'Специалист Softline' : 'Консультант Softline'}{message.role === 'assistant' && message.sender !== 'manager' && <span className="ai-tag">AI</span>}</div>
       <div className="message-body">{message.text}</div>
       {message.status === 'partial' && <p className="partial"><Icon name="warning" />Ответ прерван. Показана сохранённая часть.</p>}
       {message.status === 'streaming' && <p className="muted">Сохранённая часть ответа</p>}
@@ -72,7 +74,7 @@ export function ChatView({ state, controller, mock = false, embedded = false }: 
   return <div className={embedded ? 'chat-section' : 'app-shell'}>
     {!embedded && <><WorkspaceHeader />{mock && <DemoBanner />}</>}
     <main className={`main${messages.length ? ' has-messages' : ''}`} id="consultant-workspace" tabIndex={-1}>
-      <div className="workspace-bar"><div className="workspace-title"><span className="workspace-icon"><Icon name="assistant" /></span><h1>Консультант Softline</h1></div><div className="workspace-actions"><span className="workspace-context"><Icon name="book" />Каталог и база знаний</span><button className="new-dialog" type="button" disabled={!['ready', 'unavailable'].includes(state.phase)} onClick={() => { setSuggestion(''); void controller.newSession() }}><Icon name="plus" />Новый диалог</button></div></div>
+      <div className="workspace-bar"><div className="workspace-title"><span className="workspace-icon"><Icon name="assistant" /></span><h1>Консультант Softline</h1></div><div className="workspace-actions"><button className="new-dialog" type="button" disabled={!['ready', 'unavailable'].includes(state.phase)} onClick={() => { setSuggestion(''); void controller.newSession() }}><Icon name="plus" />Новый диалог</button></div></div>
       <div className="conversation" ref={viewport} onScroll={() => {
         const el = viewport.current
         if (el) {
@@ -104,10 +106,12 @@ export function ChatView({ state, controller, mock = false, embedded = false }: 
         </section>}
         {state.updatedOffer && <section className="updated-offer"><h2>Обновлённое предложение</h2><OfferCard offer={state.updatedOffer} selected={false} disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
         {selected && !selectedInHistory && <section className="updated-offer"><h2>Выбранное предложение</h2><OfferCard offer={selected} selected disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
-        {state.session && messages.length > 0 && <div className="conversation-actions">
-          {state.session.quotes_enabled && selected && !busy && <QuoteDraftAction key={`${state.session.session_id}:${selected.offer_id}:${selected.catalog_version}:${state.session.last_turn?.turn_id}`} sessionId={state.session.session_id} demo={mock} onRefresh={() => void controller.recover()} />}
-          <ChatHandoff key={state.session.session_id} session={state.session} demo={mock} disabled={!!busy} />
+        {state.session && messages.length > 0 && state.session.quotes_enabled && selected && !busy && <div className="conversation-actions">
+          <QuoteDraftAction key={`${state.session.session_id}:${selected.offer_id}:${selected.catalog_version}:${state.session.last_turn?.turn_id}`} sessionId={state.session.session_id} demo={mock} onRefresh={() => void controller.recover()} />
         </div>}
+        {mock && selected && !busy && <div className="conversation-actions"><InvoiceDemo /></div>}
+        <AutomaticHandoffNotice notice={automaticHandoff} />
+        {handoffIssue && <p className="handoff-sync-issue muted" role="status">{handoffIssue}</p>}
         <div className="conversation-end" ref={end} aria-hidden="true" />
       </div>
       {messages.length > 0 && !atEnd && <div className="conversation-jump"><button type="button" className="latest" aria-label="К последнему сообщению" title="К последнему сообщению" onClick={() => {
@@ -124,5 +128,11 @@ export function ChatView({ state, controller, mock = false, embedded = false }: 
 
 export function ChatPage({ embedded = false }: { embedded?: boolean }) {
   const { state, controller } = useChat()
-  return <ChatView state={state} controller={controller} mock={import.meta.env.MODE === 'mock'} embedded={embedded} />
+  const { handoff, issue } = useSessionHandoff(state, controller)
+  const notice = handoff ? {
+    title: handoff.status === 'resolved' ? 'Обращение завершено' : 'Обращение передано специалисту',
+    message: handoff.status === 'resolved' ? 'Вы можете продолжить диалог с ИИ-консультантом.' : handoff.status === 'queued' ? 'Ожидаем специалиста. Вы можете добавить уточнения в этот диалог.' : 'Специалист работает с обращением. Продолжайте переписку здесь.',
+    caseReference: handoff.handoff_id,
+  } : undefined
+  return <ChatView state={state} controller={controller} mock={import.meta.env.MODE === 'mock'} embedded={embedded} automaticHandoff={notice} handoffIssue={issue} />
 }

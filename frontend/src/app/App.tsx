@@ -1,4 +1,4 @@
-import { Component, useEffect, useRef, type ErrorInfo, type ReactNode } from 'react'
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { ChatPage } from '../pages/chat/ChatPage'
 import { ManagerPage } from '../pages/manager/ManagerPage'
 import { useAppRoute } from '../shared/lib/useAppRoute'
@@ -16,6 +16,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean
   }
 }
 export function App() {
+  const [managerToken, setManagerToken] = useState('')
   const { route, chatVisited } = useAppRoute()
   const routeKey = `${route.section}:${route.caseId || ''}`
   const previousRoute = useRef(routeKey)
@@ -28,6 +29,6 @@ export function App() {
     <WorkspaceHeader section={route.section} />
     {demo && <DemoBanner />}
     <div className="section-frame" hidden={route.section !== 'chat'}>{chatVisited && <ChatPage embedded />}</div>
-    {route.section === 'manager' && <ManagerPage caseId={route.caseId} demo={demo} />}
+    {route.section === 'manager' && <ManagerPage caseId={route.caseId} demo={demo} token={managerToken} onTokenChange={setManagerToken} />}
   </div></ErrorBoundary>
 }

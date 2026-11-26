@@ -27,6 +27,7 @@ chat:
   model-idle-ms: ${CHAT_MODEL_IDLE_MS:15000}
   parallel-turns: ${CHAT_PARALLEL_TURNS:8}
   quotes-enabled: ${CHAT_QUOTES_ENABLED:false}
+  invoice-drafts-enabled: ${CHAT_INVOICE_DRAFTS_ENABLED:false}
 
 ml:
   base-url: ${ML_BASE_URL:}

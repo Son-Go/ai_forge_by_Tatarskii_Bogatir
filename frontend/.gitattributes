@@ -1,0 +1,2 @@
+# SSE events require an empty line after the final data block.
+contracts/examples/*.sse whitespace=-blank-at-eof

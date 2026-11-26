@@ -10,11 +10,29 @@ import java.util.UUID;
 final class ChatTypes {
     record Send(UUID clientMessageId, String text, UUID retryOfTurnId) {}
     record Choose(String offerId, UUID catalogVersion) {}
-    record QuoteRequest(String customerName, BigDecimal quantity) {}
-    record QuoteDraft(String customerName, String name, String vendorCode, int quantity,
-                      BigDecimal unitPrice, String currency) {
+    record DocumentDraftRequest(String customerName, BigDecimal quantity) {}
+    record DocumentDraft(String customerName, String name, String vendorCode, int quantity,
+                         BigDecimal unitPrice, String currency) {
         BigDecimal total() {
             return unitPrice.multiply(BigDecimal.valueOf(quantity));
+        }
+    }
+    enum DraftKind {
+        QUOTE("Коммерческое предложение", "quote-draft.pdf", "НДС, условия оплаты, срок поставки и срок действия уточняет менеджер."),
+        INVOICE("Счёт", "invoice-draft.pdf", "Черновик для согласования. Оплата по документу не предусмотрена.");
+
+        final String title;
+        final String fileName;
+        final String note;
+
+        DraftKind(String title, String fileName, String note) {
+            this.title = title;
+            this.fileName = fileName;
+            this.note = note;
+        }
+
+        String errorCode(String suffix) {
+            return name() + "_" + suffix;
         }
     }
     record Owner(UUID id, String token) {}
