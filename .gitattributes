@@ -1,0 +1,2 @@
+# An empty line terminates each event, including the last one in an SSE example.
+contracts/examples/*.sse whitespace=-blank-at-eof

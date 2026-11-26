@@ -1,0 +1,341 @@
+import asyncio
+import json
+from contextlib import asynccontextmanager
+
+import httpx
+import pytest
+from starlette.requests import ClientDisconnect
+
+from app.config import Settings
+from app.main import create_app, make_deadline
+
+AUTH = {"Authorization": "Bearer service-test"}
+INTERPRET = {
+    "request_id": "req-interpret",
+    "deadline_ms": 1_000,
+    "text": "Нужна новая лицензия MDaemon на 50 пользователей",
+    "conversation_context": [{"role": "user", "text": "Подбираю почтовый сервер"}],
+    "requirements": {"domestic_required": False},
+}
+COMPOSE = {
+    "request_id": "req-compose",
+    "deadline_ms": 1_000,
+    "outcome": "answer",
+    "facts": [{"id": "seats", "text": "До 50 пользователей."}],
+    "language": "ru",
+}
+RESULT = {
+    "intent": "known_product",
+    "product_query": "MDaemon",
+    "updates": [
+        {"op": "set", "field": "seats", "value": 50, "evidence": "50 пользователей"},
+        {"op": "clear", "field": "edition"},
+    ],
+    "clarification_candidates": ["license_term_months"],
+}
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture
+def settings(monkeypatch):
+    for name in Settings.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+    return Settings(
+        ml_service_token="service-test",
+        runpod_api_key="provider-test",
+        runpod_endpoint_id="endpoint-test",
+        runpod_model="org/model-awq",
+        runpod_model_version="release-a",
+    )
+
+
+@asynccontextmanager
+async def client_for(settings, handler):
+    app = create_app(settings, runpod_transport=httpx.MockTransport(handler))
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client,
+    ):
+        yield client
+
+
+def completion(content):
+    return httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": json.dumps(content)}, "finish_reason": "stop"}]},
+    )
+
+
+def chunk(content, *, finish_reason=None):
+    choice = {"delta": {"content": content}, "finish_reason": finish_reason}
+    return f"data: {json.dumps({'choices': [choice]})}\n\n"
+
+
+def sse_response(content):
+    return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, text=content)
+
+
+def events(response):
+    return [
+        (kind.removeprefix("event: "), json.loads(data.removeprefix("data: ")))
+        for frame in response.text.split("\n\n")
+        if frame.startswith("event: ")
+        for kind, data in [frame.splitlines()]
+    ]
+
+
+def unexpected_request(_):
+    pytest.fail("RunPod received a request unexpectedly")
+
+
+async def test_health_and_auth_are_local(settings):
+    async with client_for(settings, unexpected_request) as client:
+        assert (await client.get("/health/live")).json() == {"status": "up"}
+        assert (await client.get("/health/ready")).json() == {"status": "up"}
+        response = await client.post("/internal/v1/interpret", json=INTERPRET)
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.json()["request_id"] == INTERPRET["request_id"]
+
+
+async def test_readiness_down_with_missing_profile(settings):
+    settings.runpod_api_key = None
+    async with client_for(settings, unexpected_request) as client:
+        assert (await client.get("/health/live")).json() == {"status": "up"}
+        response = await client.get("/health/ready")
+        api_error = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+    assert response.status_code == 503
+    assert response.json() == {"status": "down"}
+    assert api_error.status_code == 503
+    assert api_error.json()["code"] == "ML_NOT_CONFIGURED"
+
+
+@pytest.mark.parametrize(
+    "patch", [{"deadline_ms": 0}, {"text": " "}, {"requirements": {"seats": True}}]
+)
+async def test_invalid_input_is_400_before_runpod(settings, patch):
+    async with client_for(settings, unexpected_request) as client:
+        response = await client.post("/internal/v1/interpret", json=INTERPRET | patch, headers=AUTH)
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_REQUEST"
+
+
+@pytest.mark.parametrize("structured", [False, True])
+async def test_interpret_uses_runpod_and_returns_release_metadata(settings, structured):
+    if structured:
+        settings.runpod_response_format = "json_schema"
+        settings.runpod_send_chat_template_kwargs = True
+
+    def handler(request):
+        assert str(request.url) == (
+            "https://api.runpod.ai/v2/endpoint-test/openai/v1/chat/completions"
+        )
+        assert request.headers["Authorization"] == "Bearer provider-test"
+        assert request.headers["X-Request-Id"] == INTERPRET["request_id"]
+        assert request.extensions["timeout"]["read"] == 120.0
+        body = json.loads(request.content)
+        assert body["model"] == "org/model-awq"
+        assert body["stream"] is False
+        if structured:
+            assert body["response_format"]["type"] == "json_schema"
+            assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        else:
+            assert "response_format" not in body
+            assert "chat_template_kwargs" not in body
+        assert json.loads(body["messages"][1]["content"]) == {
+            key: value
+            for key, value in INTERPRET.items()
+            if key not in ("request_id", "deadline_ms")
+        }
+        return completion(RESULT)
+
+    async with client_for(settings, handler) as client:
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+    assert response.status_code == 200
+    assert response.headers["X-Prompt-Version"] == "interpret-1"
+    assert response.json() == RESULT | {"model_version": "release-a"}
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"op": "set", "field": "seats", "value": "50", "evidence": "50 пользователей"},
+        {"op": "set", "field": "seats", "value": 50, "evidence": "фрагмент отсутствует"},
+        {"op": "set", "field": "budget_rub", "value": "5,000", "evidence": "50"},
+    ],
+)
+async def test_interpret_rejects_invalid_model_update(settings, update):
+    async with client_for(settings, lambda _: completion(RESULT | {"updates": [update]})) as client:
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["code"] == "MODEL_INVALID_OUTPUT"
+
+
+async def test_compose_buffers_partial_chunks_and_validates_each_block(settings):
+    block = {"text": "Подходит для 50 пользователей.", "fact_ids": ["seats"]}
+    encoded = json.dumps(block, ensure_ascii=False)
+    upstream = chunk(encoded[:20]) + chunk(encoded[20:] + "\n" + encoded)
+    upstream += chunk(None, finish_reason="stop") + "data: [DONE]\n\n"
+
+    def handler(request):
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        assert json.loads(body["messages"][1]["content"])["facts"] == COMPOSE["facts"]
+        return sse_response(upstream)
+
+    async with client_for(settings, handler) as client:
+        response = await client.post("/internal/v1/compose", json=COMPOSE, headers=AUTH)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert events(response) == [
+        ("block", block),
+        ("block", block),
+        ("complete", {"model_version": "release-a", "prompt_version": "compose-1"}),
+    ]
+
+
+@pytest.mark.parametrize(
+    "remainder",
+    [
+        chunk('{"text":"Недостоверно","fact_ids":["unknown"]}\n') + "data: [DONE]\n\n",
+        chunk(None, finish_reason="length") + "data: [DONE]\n\n",
+        "",
+    ],
+)
+async def test_compose_returns_failed_for_invalid_or_interrupted_stream(settings, remainder):
+    valid = chunk('{"text":"До 50.","fact_ids":["seats"]}\n')
+    async with client_for(settings, lambda _: sse_response(valid + remainder)) as client:
+        response = await client.post("/internal/v1/compose", json=COMPOSE, headers=AUTH)
+    result = events(response)
+    assert [kind for kind, _ in result] == ["block", "failed"]
+    assert result[-1][1]["code"] == "MODEL_INVALID_OUTPUT"
+
+
+async def test_provider_error_contains_no_upstream_payload(settings):
+    async with client_for(
+        settings, lambda _: httpx.Response(429, text="private provider text")
+    ) as client:
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["code"] == "MODEL_UNAVAILABLE"
+    assert "private provider text" not in response.text
+
+
+@pytest.mark.parametrize("remaining_ms, seconds", [(28_000, 28), (119_000, 119), (160_000, 120)])
+async def test_deadline_uses_remaining_budget_up_to_service_limit(remaining_ms, seconds):
+    clock = asyncio.get_running_loop().time
+    started = clock()
+    expires = make_deadline(remaining_ms)
+    assert started + seconds <= expires <= clock() + seconds
+
+
+@pytest.mark.parametrize("path, body", [("interpret", INTERPRET), ("compose", COMPOSE)])
+async def test_deadline_bounds_upstream_wait(settings, path, body):
+    async def slow_provider(_):
+        await asyncio.sleep(2)
+        pytest.fail("FastAPI did not cancel the provider wait")
+
+    async with client_for(settings, slow_provider) as client:
+        response = await client.post(
+            f"/internal/v1/{path}", json=body | {"deadline_ms": 25}, headers=AUTH
+        )
+    if path == "compose":
+        [(kind, error)] = events(response)
+        assert kind == "failed"
+    else:
+        assert response.status_code == 503
+        error = response.json()
+    assert error["code"] == "MODEL_TIMEOUT"
+
+
+async def test_waiting_for_provider_slot_counts_toward_deadline(settings):
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    calls = 0
+
+    async def handler(_):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await finish.wait()
+        return completion(RESULT)
+
+    async with client_for(settings, handler) as client:
+        first = asyncio.create_task(
+            client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+        )
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            response = await client.post(
+                "/internal/v1/interpret",
+                json=INTERPRET | {"request_id": "queued", "deadline_ms": 25},
+                headers=AUTH,
+            )
+        finally:
+            finish.set()
+            first_response = await first
+
+    assert first_response.status_code == 200
+    assert response.status_code == 503
+    assert response.json()["code"] == "MODEL_TIMEOUT"
+    assert calls == 1
+
+
+@pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])
+async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asgi_version):
+    class HangingStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield chunk('{"text":"До 50.","fact_ids":["seats"]}\n').encode("utf-8")
+            await asyncio.sleep(3)
+
+        async def aclose(self):
+            self.closed = True
+
+    upstream = HangingStream()
+
+    def handler(_):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=upstream)
+
+    async def disconnect():
+        app = create_app(settings, runpod_transport=httpx.MockTransport(handler))
+        inbox = asyncio.Queue()
+        inbox.put_nowait({"type": "http.request", "body": json.dumps(COMPOSE).encode()})
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": asgi_version},
+            "method": "POST",
+            "path": "/internal/v1/compose",
+            "query_string": b"",
+            "headers": [
+                (b"authorization", b"Bearer service-test"),
+                (b"content-type", b"application/json"),
+            ],
+        }
+
+        async def send(message):
+            if b"event: block" in message.get("body", b""):
+                inbox.put_nowait({"type": "http.disconnect"})
+                if asgi_version == "2.4":
+                    raise OSError("Connection closed")
+
+        async with app.router.lifespan_context(app):
+            async with asyncio.timeout(2):
+                if asgi_version == "2.4":
+                    with pytest.raises(ExceptionGroup) as disconnect_group:
+                        await app(scope, inbox.get, send)
+                    assert isinstance(disconnect_group.value.exceptions[0], ClientDisconnect)
+                else:
+                    await app(scope, inbox.get, send)
+            assert upstream.closed
+            assert not app.state.runpod.slots.locked()
+
+    await disconnect()

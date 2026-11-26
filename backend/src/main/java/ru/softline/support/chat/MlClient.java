@@ -5,6 +5,8 @@ import static ru.softline.support.chat.ChatTypes.*;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,6 +15,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -25,17 +28,24 @@ import org.springframework.stereotype.Component;
 @Component
 class MlClient {
     private static final int MAX_JSON = 131_072;
-    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4))
+    private final HttpClient http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+            .connectTimeout(Duration.ofSeconds(4))
             .followRedirects(HttpClient.Redirect.NEVER).build();
     private final ObjectMapper json;
     private final URI base;
     private final String token;
+    private final int maxContextBytes;
 
     MlClient(ObjectMapper json, @Value("${ml.base-url:}") String url,
-             @Value("${ml.service-token:}") String token, @Value("${ml.data-region:}") String region) {
+             @Value("${ml.service-token:}") String token, @Value("${ml.data-region:}") String region,
+             @Value("${ml.max-context-bytes:24000}") int maxContextBytes) {
         this.json = json;
         this.token = token;
         this.base = url.isBlank() ? null : URI.create(url);
+        if (maxContextBytes < 4_000 || maxContextBytes > 100_000) {
+            throw new IllegalArgumentException("ML context budget must be between 4000 and 100000 bytes");
+        }
+        this.maxContextBytes = maxContextBytes;
         if (base != null && (!"RU".equals(region) || token.isBlank() || base.getHost() == null
                 || !List.of("http", "https").contains(base.getScheme()) || base.getUserInfo() != null)) {
             throw new IllegalArgumentException("ML requires a Russian deployment, an HTTP service address and a service token");
@@ -47,6 +57,9 @@ class MlClient {
         var response = call(turn, "/internal/v1/interpret", "application/json",
                 Map.of("text", turn.userText(), "conversation_context", context, "requirements", requirements));
         try (InputStream input = response.body()) {
+            if (response.statusCode() == 503 && isModelTimeout(input)) {
+                throw new HttpTimeoutException("ML model deadline expired");
+            }
             verify(response, "application/json");
             byte[] data = input.readNBytes(MAX_JSON + 1);
             if (data.length > MAX_JSON) throw new IOException("Invalid ML body size");
@@ -61,7 +74,8 @@ class MlClient {
 
     String compose(Turn turn, Reply reply, Consumer<JsonNode> block) throws IOException, InterruptedException {
         var response = call(turn, "/internal/v1/compose", "text/event-stream",
-                Map.of("outcome", reply.outcome(), "facts", reply.facts(), "language", "ru"));
+                Map.of("outcome", reply.outcome(), "facts", reply.facts().stream()
+                        .map(fact -> new Fact(fact.id(), limitFactText(fact.text()))).toList(), "language", "ru"));
         try (InputStream input = response.body();
              BufferedReader lines = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
             verify(response, "text/event-stream");
@@ -100,21 +114,56 @@ class MlClient {
         long remaining = Duration.between(Instant.now(), turn.deadline()).toMillis();
         if (remaining <= 0) throw new java.net.http.HttpTimeoutException("Turn deadline expired");
         var body = json.valueToTree(fields);
-        if (!(body instanceof com.fasterxml.jackson.databind.node.ObjectNode object)) {
+        if (!(body instanceof ObjectNode object)) {
             throw new JsonProcessingException("ML request must be an object") {};
         }
         object.put("request_id", turn.requestId()).put("deadline_ms", remaining);
+        byte[] payload = boundedPayload(object);
         var request = HttpRequest.newBuilder(base.resolve(path))
                 .timeout(Duration.ofMillis(remaining)).header("Authorization", "Bearer " + token)
                 .header("Accept", accept).header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofByteArray(json.writeValueAsBytes(object))).build();
+                .POST(HttpRequest.BodyPublishers.ofByteArray(payload)).build();
         return http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+    }
+
+    private byte[] boundedPayload(ObjectNode body) throws IOException {
+        byte[] payload = json.writeValueAsBytes(body);
+        if (body.get("conversation_context") instanceof ArrayNode history) {
+            while (payload.length > maxContextBytes && !history.isEmpty()) {
+                history.remove(0);
+                payload = json.writeValueAsBytes(body);
+            }
+        } else if (body.get("facts") instanceof ArrayNode facts) {
+            while (payload.length > maxContextBytes && facts.size() > 1) {
+                facts.remove(facts.size() - 1);
+                payload = json.writeValueAsBytes(body);
+            }
+        }
+        if (payload.length > maxContextBytes) throw new IOException("ML context budget exceeded");
+        return payload;
+    }
+
+    private static String limitFactText(String text) {
+        return text.codePointCount(0, text.length()) > 2_000
+                ? text.substring(0, text.offsetByCodePoints(0, 2_000))
+                : text;
     }
 
     private static void verify(HttpResponse<?> response, String type) throws IOException {
         if (response.statusCode() != 200 || response.headers().firstValue("Content-Type")
                 .filter(value -> value.toLowerCase(java.util.Locale.ROOT).startsWith(type)).isEmpty()) {
             throw new IOException("Invalid ML HTTP response");
+        }
+    }
+
+    private boolean isModelTimeout(InputStream input) throws IOException {
+        byte[] data = input.readNBytes(MAX_JSON + 1);
+        if (data.length > MAX_JSON) return false;
+        try {
+            JsonNode error = json.readTree(data);
+            return error != null && "MODEL_TIMEOUT".equals(error.path("code").asText());
+        } catch (JsonProcessingException ignored) {
+            return false;
         }
     }
 

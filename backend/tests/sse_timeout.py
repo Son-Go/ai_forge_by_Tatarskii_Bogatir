@@ -22,6 +22,7 @@ class MockMl(BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/internal/v1/interpret":
+            self.server.interpret_budgets.append(request["deadline_ms"])
             self.wait_if_cold("interpret", request)
             payload = json.dumps({
                 "intent": "known_product",
@@ -67,6 +68,7 @@ def run(args):
         mock.cold_delay = args.cold_delay
         mock.cold_stage = args.cold_stage
         mock.cold_used = False
+        mock.interpret_budgets = []
         threading.Thread(target=mock.serve_forever, daemon=True).start()
         feed = Path(tmp, "test.xml")
         feed.write_text(f"""
@@ -87,12 +89,15 @@ def run(args):
             "CATALOG_KNOWLEDGE_FILE": "",
             "CHAT_PUBLIC_ORIGIN": origin,
             "CHAT_TURN_TIMEOUT_MS": "3000",
+            "CHAT_COLD_TURN_TIMEOUT_MS": "3000",
+            "CHAT_MODEL_IDLE_MS": "2000",
             "ML_BASE_URL": f"http://127.0.0.1:{mock.server_port}",
             "ML_SERVICE_TOKEN": "test-only",
             "ML_DATA_REGION": "RU",
         }
         if args.cold_delay:
             env.pop("CHAT_TURN_TIMEOUT_MS")
+            env.pop("CHAT_COLD_TURN_TIMEOUT_MS")
         log = Path(tmp, "backend.log")
         with log.open("w") as output:
             server = subprocess.Popen([args.java, "-jar", str(args.jar)], env=env, stdout=output, stderr=output)
@@ -123,14 +128,15 @@ def run(args):
                     assert events[-1] == "done" and answer["status"] == "complete", events
                     assert args.cold_delay <= elapsed < 120
                     assert args.cold_delay * 1000 < mock.cold_budget <= 120_000
+                    assert 110_000 < mock.interpret_budgets[0] <= 120_000
                     assert any(line.startswith(":") and "waiting" in line for line in stream.splitlines())
-                    warm_body = json.dumps({"client_message_id": str(uuid.uuid4()), "text": "DemoMail"}).encode()
-                    warm_start = time.monotonic()
-                    with urlopen(Request(url + "/messages", warm_body, headers), timeout=10) as response:
-                        warm_stream = response.read().decode()
-                    warm_elapsed = time.monotonic() - warm_start
-                    assert "event:done" in warm_stream and warm_elapsed < 10
-                    print(f"PASS: cold {args.cold_stage} {elapsed:.1f} s with SSE heartbeat, warm {warm_elapsed:.1f} s")
+                    for idle_seconds, lower, upper in ((0, 85_000, 90_000), (2.2, 110_000, 120_000)):
+                        time.sleep(idle_seconds)
+                        followup = json.dumps({"client_message_id": str(uuid.uuid4()), "text": "DemoMail"}).encode()
+                        with urlopen(Request(url + "/messages", followup, headers), timeout=10) as response:
+                            assert "event:done" in response.read().decode()
+                        assert lower < mock.interpret_budgets[-1] <= upper, mock.interpret_budgets
+                    print(f"PASS: cold {args.cold_stage} {elapsed:.1f} s with SSE heartbeat; budgets {mock.interpret_budgets}")
                 else:
                     assert events[-1] == "failed" and answer["status"] == "partial", events
                     assert history["last_turn"]["error_code"] == "TURN_TIMEOUT", history["last_turn"]

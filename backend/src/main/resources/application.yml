@@ -22,10 +22,13 @@ server:
 
 chat:
   public-origin: ${CHAT_PUBLIC_ORIGIN:http://localhost:8080}
-  turn-timeout-ms: ${CHAT_TURN_TIMEOUT_MS:120000}
+  turn-timeout-ms: ${CHAT_TURN_TIMEOUT_MS:90000}
+  cold-turn-timeout-ms: ${CHAT_COLD_TURN_TIMEOUT_MS:120000}
+  model-idle-ms: ${CHAT_MODEL_IDLE_MS:15000}
   parallel-turns: ${CHAT_PARALLEL_TURNS:8}
 
 ml:
   base-url: ${ML_BASE_URL:}
   data-region: ${ML_DATA_REGION:}
   service-token: ${ML_SERVICE_TOKEN:}
+  max-context-bytes: ${ML_MAX_CONTEXT_BYTES:24000}

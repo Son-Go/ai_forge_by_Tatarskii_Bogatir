@@ -20,6 +20,10 @@ paths:
       responses:
         '200':
           description: Интерпретация текущей реплики
+          headers:
+            X-Prompt-Version:
+              description: Версия промпта interpret
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InterpretResult' }
@@ -92,8 +96,11 @@ components:
             properties:
               status: { enum: [up, down] }
   schemas:
-    RequestId: { type: string, minLength: 1 }
-    DeadlineMs: { type: integer, minimum: 1 }
+    RequestId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    DeadlineMs:
+      type: integer
+      minimum: 1
+      description: Остаток дедлайна хода. Лимит FastAPI составляет 120 000 мс и включает очередь и холодный запуск.
     PositiveInt: { type: integer, minimum: 1 }
     Budget: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
     LicenseKind: { enum: [new, renewal] }
@@ -122,16 +129,19 @@ components:
         text:
           type: string
           minLength: 1
+          maxLength: 8000
+          pattern: '\S'
           description: Полный текст текущей реплики пользователя.
         conversation_context:
           type: array
+          maxItems: 8
           description: Релевантные предыдущие реплики в порядке диалога
           items:
             type: object
             required: [role, text]
             properties:
               role: { enum: [user, assistant] }
-              text: { type: string }
+              text: { type: string, maxLength: 4000 }
         requirements: { $ref: '#/components/schemas/Requirements' }
     InterpretResult:
       type: object
@@ -164,7 +174,12 @@ components:
             op: { const: set }
             field: { $ref: '#/components/schemas/RequirementField' }
             value: {}
-            evidence: { type: string, minLength: 1 }
+            evidence:
+              type: string
+              minLength: 1
+              maxLength: 240
+              pattern: '\S'
+              description: Точная цитата из текущей реплики пользователя.
           oneOf:
             - properties:
                 field: { enum: [product_name, edition, deployment, platform, use_case] }
@@ -190,24 +205,26 @@ components:
         outcome: { enum: [clarify, recommend, answer, insufficient_data] }
         facts:
           type: array
-          description: Подтверждённые факты, каждый с текстом и идентификатором для ссылки из ответа.
+          maxItems: 16
+          description: Подтверждённые факты с уникальными идентификаторами.
           items:
             type: object
             required: [id, text]
             properties:
-              id: { type: string, minLength: 1 }
-              text: { type: string, minLength: 1 }
-        language: { type: string, minLength: 2 }
+              id: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
+              text: { type: string, minLength: 1, maxLength: 2000, pattern: '\S' }
+        language: { type: string, minLength: 2, maxLength: 32 }
     Block:
       type: object
       required: [text, fact_ids]
       properties:
-        text: { type: string, minLength: 1 }
+        text: { type: string, minLength: 1, maxLength: 2000 }
         fact_ids:
-          description: Ссылки на идентификаторы из facts текущего запроса
+          description: Ссылки на факты запроса. В recommend и answer требуется хотя бы одна ссылка.
           type: array
+          maxItems: 16
           uniqueItems: true
-          items: { type: string, minLength: 1 }
+          items: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
     Complete:
       type: object
       required: [model_version, prompt_version]

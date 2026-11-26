@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.StreamSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,24 +32,35 @@ class ChatFlow {
     private final MlClient ml;
     private final ReplyPlanner planner;
     private final Semaphore capacity;
-    private final long timeoutMillis;
+    private final long warmTimeoutMillis;
+    private final long coldTimeoutMillis;
+    private final long modelIdleNanos;
+    private final AtomicLong lastModelResponse = new AtomicLong(Long.MIN_VALUE);
     private final java.util.concurrent.ScheduledExecutorService timers = Executors.newScheduledThreadPool(2);
 
     ChatFlow(ChatStore store, MlClient ml, ReplyPlanner planner,
              @Value("${chat.parallel-turns:8}") int parallel,
-             @Value("${chat.turn-timeout-ms}") long timeoutMillis) {
-        if (parallel < 1 || timeoutMillis < 100 || timeoutMillis > 300_000) {
+             @Value("${chat.turn-timeout-ms}") long warmTimeoutMillis,
+             @Value("${chat.cold-turn-timeout-ms}") long coldTimeoutMillis,
+             @Value("${chat.model-idle-ms}") long modelIdleMillis) {
+        if (parallel < 1 || warmTimeoutMillis < 100 || coldTimeoutMillis < warmTimeoutMillis
+                || coldTimeoutMillis > 300_000 || modelIdleMillis < 1 || modelIdleMillis > 86_400_000) {
             throw new IllegalArgumentException("Invalid turn limits");
         }
         this.store = store;
         this.ml = ml;
         this.planner = planner;
         this.capacity = new Semaphore(parallel);
-        this.timeoutMillis = timeoutMillis;
+        this.warmTimeoutMillis = warmTimeoutMillis;
+        this.coldTimeoutMillis = coldTimeoutMillis;
+        this.modelIdleNanos = TimeUnit.MILLISECONDS.toNanos(modelIdleMillis);
     }
 
     SseEmitter open(UUID id, String token, Send input) {
         if (!capacity.tryAcquire()) throw new ChatError(429, "TURN_LIMIT", "Сервис занят. Повторите запрос чуть позже.");
+        long lastResponse = lastModelResponse.get();
+        long timeoutMillis = lastResponse == Long.MIN_VALUE || System.nanoTime() - lastResponse >= modelIdleNanos
+                ? coldTimeoutMillis : warmTimeoutMillis;
         Accepted accepted;
         try {
             accepted = store.reserve(id, token, input, timeoutMillis);
@@ -127,6 +139,7 @@ class ChatFlow {
         MlClient.Interpretation interpretation;
         try {
             interpretation = ml.interpret(turn, old, store.context(turn));
+            lastModelResponse.accumulateAndGet(System.nanoTime(), Math::max);
         } catch (IOException ex) {
             requireActive(turn);
             String code = ex instanceof java.net.http.HttpTimeoutException ? "TURN_TIMEOUT" : "ML_UNAVAILABLE";
@@ -143,6 +156,7 @@ class ChatFlow {
             send(emitter, "status", Map.of("stage", "generating"));
             try {
                 promptVersion = ml.compose(turn, reply, block -> emitFactBlock(turn, emitter, reply.facts(), block, sent));
+                lastModelResponse.accumulateAndGet(System.nanoTime(), Math::max);
             } catch (IOException ex) {
                 requireActive(turn);
                 log.info("Using verified facts request_id={} turn_id={}", turn.requestId(), turn.turnId());
