@@ -43,7 +43,7 @@ class Requirements(TypedDict, total=False):
 
 class ConversationMessage(StrictModel):
     role: Literal["user", "assistant"]
-    text: Annotated[str, StringConstraints(max_length=4_000)]
+    text: Annotated[str, StringConstraints(max_length=4_000)] = Field(serialization_alias="content")
 
 
 class ModelRequest(StrictModel):

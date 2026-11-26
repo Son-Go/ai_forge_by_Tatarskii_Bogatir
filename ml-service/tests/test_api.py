@@ -14,7 +14,10 @@ INTERPRET = {
     "request_id": "req-interpret",
     "deadline_ms": 1_000,
     "text": "Нужна новая лицензия MDaemon на 50 пользователей",
-    "conversation_context": [{"role": "user", "text": "Подбираю почтовый сервер"}],
+    "conversation_context": [
+        {"role": "user", "text": "Подбираю почтовый сервер"},
+        {"role": "assistant", "text": "Уточните количество пользователей."},
+    ],
     "requirements": {"domestic_required": False},
 }
 COMPOSE = {
@@ -149,9 +152,12 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
         else:
             assert "response_format" not in body
         assert json.loads(body["messages"][1]["content"]) == {
-            key: value
-            for key, value in INTERPRET.items()
-            if key not in ("request_id", "deadline_ms")
+            "text": INTERPRET["text"],
+            "conversation_context": [
+                {"role": "user", "content": "Подбираю почтовый сервер"},
+                {"role": "assistant", "content": "Уточните количество пользователей."},
+            ],
+            "requirements": INTERPRET["requirements"],
         }
         return completion(RESULT)
 

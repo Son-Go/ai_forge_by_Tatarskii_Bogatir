@@ -75,7 +75,7 @@ router = APIRouter(
 
 
 def model_payload(body: ModelRequest, provider: RunpodClient) -> str:
-    payload = body.model_dump_json(exclude={"request_id", "deadline_ms"})
+    payload = body.model_dump_json(by_alias=True, exclude={"request_id", "deadline_ms"})
     if len(payload.encode("utf-8")) > provider.settings.ml_max_context_bytes:
         raise ServiceError("CONTEXT_TOO_LARGE", "Контекст запроса слишком большой.", 400)
     return payload
