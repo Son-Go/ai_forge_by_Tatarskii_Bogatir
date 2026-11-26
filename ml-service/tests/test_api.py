@@ -131,7 +131,6 @@ async def test_invalid_input_is_400_before_runpod(settings, patch):
 async def test_interpret_uses_runpod_and_returns_release_metadata(settings, structured):
     if structured:
         settings.runpod_response_format = "json_schema"
-        settings.runpod_send_chat_template_kwargs = True
 
     def handler(request):
         assert str(request.url) == (
@@ -143,12 +142,12 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
         body = json.loads(request.content)
         assert body["model"] == "org/model-awq"
         assert body["stream"] is False
+        assert body["temperature"] == 0
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
         if structured:
             assert body["response_format"]["type"] == "json_schema"
-            assert body["chat_template_kwargs"] == {"enable_thinking": False}
         else:
             assert "response_format" not in body
-            assert "chat_template_kwargs" not in body
         assert json.loads(body["messages"][1]["content"]) == {
             key: value
             for key, value in INTERPRET.items()
@@ -187,6 +186,8 @@ async def test_compose_buffers_partial_chunks_and_validates_each_block(settings)
     def handler(request):
         body = json.loads(request.content)
         assert body["stream"] is True
+        assert body["temperature"] == 0
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
         assert json.loads(body["messages"][1]["content"])["facts"] == COMPOSE["facts"]
         return sse_response(upstream)
 

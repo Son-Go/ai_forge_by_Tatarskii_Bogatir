@@ -1,5 +1,13 @@
 # Журнал работы агентов
 
+## 26 ноября 2026 — генерация RunPod без thinking
+
+- Цель. Отключить thinking и закрепить `temperature: 0` в запросах к модели, чтобы сократить время генерации.
+- Начало работы. Сверены общий JSON запросов `interpret` и `compose`, переменные профиля и параметры шаблона vLLM.
+- В `ml-service/app/runpod.py` добавлен `chat_template_kwargs.enable_thinking=false` для обоих режимов вызова. Общий клиент передаёт `temperature: 0`. Переключатель удалён из `ml-service/app/config.py`, `ml-service/.env.example` и `infra/compose.ml.yaml`. Требование к шаблону описано в `ml-service/README.md`.
+- Проверки. В `ml-service/` прошли `uv run --locked --offline pytest -q` (23 теста), `ruff check .` и `ruff format --check .`. В `tests/test_api.py` проверен фактический JSON обоих маршрутов, включая потоковый запрос и оба формата `interpret`. Команда `docker compose --env-file ml-service/.env.example -f infra/compose.ml.yaml config --quiet` прошла.
+- Статус. Проверка обработки параметра и времени генерации на развёрнутом воркере требует настроенного профиля RunPod.
+
 ## 26 ноября 2026 — дедлайн вызовов модели
 
 - Цель. Согласовать лимит вызова FastAPI с бюджетом хода Spring Boot.
