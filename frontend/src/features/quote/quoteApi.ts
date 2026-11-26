@@ -1,9 +1,15 @@
+import type { components } from '../../shared/api/schema'
 import { requireOk } from '../../shared/api/client'
 
-// Existing public contract only. No invoice endpoint or browser-side calculations.
-export async function requestQuoteDraft(sessionId: string, signal: AbortSignal): Promise<Blob> {
+export type QuoteDraftInput = components['schemas']['QuoteRequest']
+
+export async function requestQuoteDraft(sessionId: string, input: QuoteDraftInput, signal: AbortSignal): Promise<Blob> {
+  if (!input.customer_name.trim() || input.customer_name.trim().length > 160) throw new Error('Укажите наименование заказчика до 160 символов.')
+  if (!Number.isSafeInteger(input.quantity) || input.quantity < 1 || input.quantity > 99999) throw new Error('Количество позиций должно быть целым числом от 1 до 99999.')
   const response = await requireOk(await fetch(new URL(`/api/v1/sessions/${encodeURIComponent(sessionId)}/quote-drafts`, window.location.origin), {
-    method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/pdf' },
+    method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/pdf', 'Content-Type': 'application/json' },
+    // quantity is the number of selected catalog positions, never license seats.
+    body: JSON.stringify({ customer_name: input.customer_name.trim(), quantity: input.quantity }),
     signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
   }))
   if (response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/pdf') throw new Error('Сервис не вернул PDF. Черновик не скачан.')

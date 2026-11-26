@@ -6,7 +6,7 @@ export type Source = {
   id: string; title: string; url: string; kind: 'catalog' | 'store' | 'knowledge'
 } & ({ snapshot_at: string; checked_at?: string } | { snapshot_at?: string; checked_at: string })
 export type Offer = Omit<components['schemas']['OfferCard'], 'attributes'> & { attributes: Record<string, unknown> }
-export type Message = Omit<components['schemas']['Message'], 'cards' | 'sources'> & { cards: Offer[]; sources: Source[] }
+export type Message = Omit<components['schemas']['Message'], 'cards' | 'sources'> & { cards: Offer[]; sources: Source[]; sender?: 'manager' }
 export type Session = Omit<components['schemas']['Session'], 'messages' | 'selected_offer'> & {
   messages: (Message & { status: NonNullable<Message['status']> })[]; selected_offer: Offer | null
 }

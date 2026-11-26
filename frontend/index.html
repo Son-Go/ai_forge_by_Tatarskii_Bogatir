@@ -1,9 +1,14 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f5f6f8" />
+    <meta name="theme-color" content="#15141c" />
+    <script>
+      // Apply the saved palette before CSS/React, without waiting for mock startup.
+      try { if (localStorage.getItem('softline:theme:v1') === 'light') document.documentElement.dataset.theme = 'light' } catch { /* Default dark if storage is unavailable. */ }
+      document.querySelector('meta[name="theme-color"]').content = document.documentElement.dataset.theme === 'light' ? '#f5f6f8' : '#15141c'
+    </script>
     <meta name="description" content="Подбор программного обеспечения и ответы по каталогу и базе знаний." />
     <title>Консультант Softline</title>
   </head>

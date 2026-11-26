@@ -141,3 +141,55 @@
 - Состав публикации. 42 файла: 17 изменённых tracked, 25 новых. Проверены все 74 исходных файла области Frontend+журнал (72 текстовых и 2 официальных PNG). Подтверждённых кандидатов на секреты, конфликтов, лишних пробелов, tracked ignored и запрещённых артефактов нет. Кэш/скриншоты/PDF/ZIP/каталог/зависимости node_modules не входят в Git. Предыдущие официальные логотипы оставлены как намеренные исходные активы; в dist только активный русский SVG. Защищённые каталоги/контракты/модель чата/package.json/lockfile без изменений. Удалённых исходников нет.
 - Документация и просмотр. Актуальный полный манифест, проверки и ручные команды — frontend/docs/release-readiness.md; прежний отчёт сохранён в свёрнутом историческом разделе. Добавлен frontend/docs/backend-integration.md с матрицей готового/демо/нужного Backend, SSE-гарантиями, cookie/Origin и совместным прогоном. README, вопросы Backend и дизайн-система актуализированы. Итоговые 10 снимков осмотрены в frontend/.cache/visual-preview/pre-publication/. Runtime-ошибок нет. Dev:mock на 127.0.0.1:5173 оставлен для оценки.
 - Итог. Исходники Frontend готовы к ручной фиксации/отправке для интеграции; блокирующих проблем по выполненным проверкам нет. Реальные Backend/ML, передача/очередь менеджера и документы требуют описанного серверного подключения/согласований. Ветка feat/frontend отслеживает origin/feat/frontend, HEAD остаётся 8359e42, индекс пуст. Никаких git add/commit/push/merge/deploy или сетевых fetch не выполнялось. Работа остановлена после отчёта в ожидании пользователя.
+
+
+## 2026-11-26 — Две темы и независимые от Backend UX-доработки (начало)
+- Исходное состояние: feat/frontend, HEAD d9b6f11, рабочее дерево чистое. Предыдущие визуальные доработки уже в коммите.
+- Объём: общая геометрия светлой/тёмной темы, сохранение выбора и официальные логотипы; удаление ручной передачи специалисту; завершённые демообращения и read-only CaseTimeline; минимальное пустое состояние.
+- Ограничения: без изменений Backend/ML/контрактов/транспорта и КП; без Git-записи и публикации. Автоэскалация не реализуется, серверный статус не выдумывается.
+- План проверки: после каждого этапа TypeScript/ESLint/unit; итоговые API-check/build/браузерные сценарии, обе темы, mobile/reduced-motion/контраст.
+
+### Завершение: две темы и независимый UX
+- Темы: общая геометрия, :root[data-theme], локальное предпочтение до React, переключатель/доступные иконки, официальные белый SVG и цветной PNG. Контраст светлых токенов уточнён; Dark Premium сохранён.
+- Удалены ChatHandoff/demoStore и тест регистрации. Менеджер читает только статические fixtures; клиентская переписка в очередь не копируется. AutomaticHandoffNotice — неподключённое представление для будущего подтверждённого статуса, без нового поля/события публичного API.
+- CaseTimeline объединяет переписку и синтетические действия/статусы/документы, добавлены completed и фильтр «Завершённые», пустой экран упрощён. Бизнес-переходы и генерация документов не реализованы; КП без изменений.
+- Проверки: pnpm check (api:check, tsc, ESLint 0 warnings, 34 unit/11 files, production build); pnpm test:e2e — 48/48 Chrome desktop/mobile. Контраст проверяемых пар ≥4.5:1, темы с одинаковой геометрией, 320/390px, reduced motion/transparency, SSE/restore/selection/КП/scroll/composer.
+- Production smoke: темы/оригинальные логотипы, менеджер отключён без неподтверждённого API/демоочереди/service worker. Скриншоты обоих режимов/тем и mobile в frontend/.cache/visual-preview/themes-final (ignored).
+- Промежуточные ошибки проверок исправлены: TS у time в тесте, неверный mock-ответ, скрытая mobile-панель и hover при проверке opaque fallback. Итоговые полные прогоны успешны.
+- Обновлены frontend README и docs: design-system, brandbook-review, requirements-audit, backend-integration, backend-questions, release-readiness с полным списком файлов. Код: index.html, CSS, header/theme/icons, ChatPage, ManagerPage, модель/fixtures/timeline и соответствующие тесты. Backend/ML/контракты/общая архитектура/транспорт/состояние чата/КП/dependencies не изменялись.
+- git diff --check пройден; индекс пуст, статическая проверка изменённых файлов не обнаружила кандидатов секретов/конфликтов/артефактов. Ветка feat/frontend, исходный d9b6f11 сохранён, Git-запись/публикация не выполнялась.
+- Осталось с командой: серверная автоэскалация/уведомление/GET-восстановление, менеджерские доступ/очередь/история/DTO завершения, согласованные счета/документы и совместный прогон настоящего Backend/ML. Неблокирующие для этого локального UI-этапа зависимости перечислены в frontend/docs/backend-integration.md.
+
+
+## 2026-11-26 — Фильтры и уточнение интеграции Backend (начало)
+- Исходное состояние: feat/frontend, HEAD d9b6f11, сохранены 31 незакоммиченный файл предыдущего этапа (включая удаления ручной передачи). Git-запись не выполняется.
+- Уточнения пользователя: GET manager/handoffs с Bearer/pagination/polling без серверного поиска; queued/in_progress/resolved; resolve POST; done + GET session/handoff; КП customer_name/quantity (количество позиций, не seats). Инвойсов нет.
+- Сверка: manager.openapi.yaml отсутствует в рабочей копии; public.openapi.yaml quote-drafts не содержит requestBody. Linux-путь Backend здесь недоступен. Запрошены точные схемы ответов/ошибок и обновлённые ограничения КП; серверные файлы не редактируются.
+- Доступная работа: компоновка «Все» отдельной строкой + три равных фильтра; подтверждённые статусы; только фактически доступная история; JSON-запрос КП по письменному уточнению, без ИНН/КПП/НДС. Остальная интеграция зависит от получения DTO.
+
+### 27.11 — Получены актуальные входные OpenAPI
+- Пользователь прислал manager/public YAML из Downloads/Telegram Desktop и разрешил реализовать все подтверждённые операции. Общие contracts/ не перезаписываются: неизменённые входные копии и необходимые SSE examples размещены в frontend/contracts для воспроизводимой генерации обоих наборов типов.
+- Дополнения схем: claim, detail, reply с message_id, sender=manager; КП customer_name 1..160, quantity 1..99999; клиентский text до 4000. Инвойсов/events нет. Предыдущая зависимость «нет DTO» снимается, работа продолжается.
+
+### 27.11 — Завершение интеграционной итерации
+- Последнее уточнение пользователя заменило сетку фильтров компактным select 210px. Все четыре значения сохранены, 320/390/900/1280px и две темы без переполнения; темы/официальные assets не перекрашивались.
+- Входные public/manager YAML сохранены без правки в frontend/contracts (общие contracts не менялись). Оба generated набора, api:generate/check; три исходных SSE examples перенесены без изменения для externalValue. Зависимости не добавлены, package scripts/ESLint/TS конфигурация актуализированы для новых проверок.
+- API: очередь с Bearer в памяти/401, limit=50/offset/polling, claim/read/reply/resolve; retry reply сохраняет message_id. Контекст/действия не выводятся по предположению о владельце. Статусы queued/in_progress/resolved.
+- Исправлена маршрутизация реальных UUID (ранее только DEMO), включая регистр UUID. Client handoff читается после завершения/restore, polling статуса и истории без блокировки ввода. sender=manager визуально отделён, ручной передачи нет. Background refresh защищён epoch/AbortSignal от перезаписи отправки/выбора. SSE-схема/поток не расширялись вымышленными событиями.
+- CaseTimeline только сообщения/серверные даты. Требования/владение/total/events не угадываются. КП generated QuoteRequest, customer_name 1..160, quantity 1..99999 (единицы позиции, не seats), только JSON+PDF; ИНН/КПП/НДС не добавлялись. Invoice только mock-предпросмотр без запросов/файла/расчётов.
+- Проверки: pnpm check — оба API, TS, lint 0 warnings, 40 unit/14 files, production build. Полный pnpm test:e2e — 50/50. pnpm test:api-browser — 8/8, дополнительно повторены после финальных менеджерских исправлений; mock PDF повторён desktop/mobile. Production smoke и 16 screenshot PNG в ignored .cache/visual-preview/integration-final, runtime errors/overflow отсутствуют.
+- Исправленные промежуточные проверки: UUID не открывал manager detail; два Playwright набора конфликтовали за общий outputDir (разделены), trace JS попадал в ESLint (исключён), MSW нормализовал credentials у Request (тест проверяет исходный fetch init).
+- Реального Java на localhost:8080 и настоящего manager token здесь нет. API проверен контрактными HTTP-моками, не живым Spring Boot/ML. Совместная приёмка настоящего PDF/cookie/Origin/прав/каталога/модели — следующий шаг. Неоднозначности sender в public.Message, lack assigned_to/total/events и будущее invoices зафиксированы в frontend/docs/backend-questions.md.
+- Обновлены README, интеграционная инструкция, вопросы, дизайн/требования, release-readiness с полным manifest. Изменения только frontend и этот обязательный журнал, без Backend/ML/общей архитектуры/contracts/lockfile/assets. Git add/commit/push/merge/deploy не выполнялись.
+
+
+## 2026-11-27 — Передача Backend и публикация feat/frontend
+- Пользователь принял реализацию и явно разрешил staging, commit и push в origin/feat/frontend; merge/deploy не разрешены и не выполняются. Дополнительных визуальных изменений нет.
+- Начало: feat/frontend, HEAD d9b6f1119115dc7666a5548b0e558aaf77bdd1f0; 65 файлов накопленных изменений, индекс пуст. Remote origin — github.com/Son-Go/ai_forge_by_Tatarskii_Bogatir.git.
+- Объём публикации: frontend/ и обязательный журнал. Инструкция frontend/docs/backend-integration.md актуальна; сохраняет разграничение контрактных тестов и живой интеграции, перечень оставшихся вопросов.
+- Перед записью Git проверяются исходники/неизменённые входные YAML/generated types/документация, staged diff, секреты/артефакты/защищённые пути, git diff --check. Commit hash и результат push будут переданы пользователю после подтверждения remote.
+
+- Перед staging: origin/feat/frontend по ls-remote совпал с исходным d9b6f11. Повторный pnpm check успешен: оба API, TypeScript, ESLint 0 warnings, 40/40 unit (14 files), production build. Браузерные прогоны принятой реализации ранее прошли 50/50 и 8/8; исходники с тех пор не менялись.
+- Проверка состава: 65 файлов, только frontend/ и журнал; нет изменений Backend/ML/общих contracts/архитектуры/lockfile/assets, tracked ignored и кандидатов секретов/private keys/конфликтов/генерируемого кэша. Инструкция интеграции актуальна, release-readiness переведён в состояние принятого пакета передачи.
+
+- Staged diff выявил blank-at-eof в трёх новых SSE examples: это обязательный разделитель последнего события. Примеры оставлены побайтово неизменными; frontend/.gitattributes задаёт только contracts/examples/*.sse whitespace=-blank-at-eof. Глобальные настройки Git не менялись, проверки иных пробелов не отключены. Пакет — 66 файлов с учётом этого атрибута.

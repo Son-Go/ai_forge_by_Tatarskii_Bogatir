@@ -17,7 +17,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "api:generate": "openapi-typescript ../contracts/public.openapi.yaml -o src/shared/api/schema.d.ts",
+    "test:api-browser": "playwright test --config playwright.api.config.ts",
+    "api:generate": "node scripts/generate-contracts.mjs",
     "api:check": "node scripts/check-contract.mjs",
     "check": "pnpm api:check && pnpm typecheck && pnpm lint && pnpm test && pnpm build"
   },

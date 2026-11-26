@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 
 export type AppRoute = { section: 'chat' | 'manager'; caseId: string | null }
 export function parseAppRoute(hash: string): AppRoute {
-  const match = /^#\/manager(?:\/(DEMO-[A-Z0-9-]+))?$/.exec(hash)
-  return match ? { section: 'manager', caseId: match[1] || null } : { section: 'chat', caseId: null }
+  const match = /^#\/manager(?:\/(DEMO-[A-Z0-9-]+|[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}))?$/.exec(hash)
+  return match ? { section: 'manager', caseId: match[1]?.startsWith('DEMO-') ? match[1] : match[1]?.toLowerCase() || null } : { section: 'chat', caseId: null }
 }
 
 // Hash navigation works with the existing static hosting, without new dependencies.

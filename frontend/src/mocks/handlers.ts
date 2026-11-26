@@ -54,13 +54,19 @@ function error(code: string, message: string, status: number, extra = {}) {
 function find(id: string | readonly string[] | undefined) { load(); return typeof id === 'string' ? db.get(id) : undefined }
 
 export const handlers = [
-  http.post('/api/v1/sessions/:id/quote-drafts', ({ params }) => {
+  http.get('/api/v1/sessions/:id/handoff', () => HttpResponse.json({ handoff: null })),
+  http.post('/api/v1/sessions/:id/quote-drafts', async ({ params, request }) => {
     const record = find(params.id)
     if (!record) return error('SESSION_NOT_FOUND', 'Диалог не найден.', 404)
     if (!record.session.quotes_enabled) return error('QUOTES_DISABLED', 'Черновики КП отключены.', 403)
     if (record.session.last_turn?.status === 'running') return error('TURN_IN_PROGRESS', 'Дождитесь завершения ответа.', 409)
     const selected = record.session.selected_offer
     if (!selected) return error('NO_SELECTION', 'Сначала выберите предложение.', 400)
+    const input: unknown = await request.json().catch(() => null)
+    if (!input || typeof input !== 'object' || !('customer_name' in input) || typeof input.customer_name !== 'string' || !input.customer_name.trim() || input.customer_name.length > 160
+      || !('quantity' in input) || typeof input.quantity !== 'number' || !Number.isSafeInteger(input.quantity) || input.quantity < 1 || input.quantity > 99999) {
+      return new HttpResponse('Некорректные параметры демонстрационного КП.', { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+    }
     if (!selected.price || /^0+(\.0+)?$/.test(selected.price.amount)) return error('PRICE_UNCONFIRMED', 'Цену необходимо подтвердить у менеджера.', 409)
     return new HttpResponse(demoQuotePdf(), { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="DEMO-softline-quote-draft.pdf"' } })
   }),
@@ -88,7 +94,7 @@ export const handlers = [
     const record = find(params.id)
     if (!record) return error('SESSION_NOT_FOUND', 'Диалог не найден.', 404)
     const input = await request.json() as MessageInput
-    if (typeof input.text !== 'string' || !input.text.trim() || typeof input.client_message_id !== 'string') return error('INVALID_INPUT', 'Введите сообщение.', 400)
+    if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 4000 || typeof input.client_message_id !== 'string') return error('INVALID_INPUT', 'Введите сообщение.', 400)
     if (/лимит/i.test(input.text)) return error('RATE_LIMITED', 'Слишком много запросов. Попробуйте немного позже.', 429)
     const previous = record.turns[input.client_message_id]
     if (previous && JSON.stringify(previous.input) !== JSON.stringify(input)) return error('IDEMPOTENCY_CONFLICT', 'Идентификатор уже связан с другим запросом.', 409)
