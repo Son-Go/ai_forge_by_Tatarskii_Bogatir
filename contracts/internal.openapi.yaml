@@ -1,0 +1,240 @@
+openapi: 3.1.0
+info:
+  title: Softline Internal ML API
+  version: 0.1.0
+  description: Сервисный контракт между Spring Boot и FastAPI.
+servers:
+  - url: http://ml-service:8000
+security:
+  - serviceBearer: []
+paths:
+  /internal/v1/interpret:
+    post:
+      operationId: interpret
+      summary: Определить намерение и извлечь изменения требований
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InterpretRequest' }
+      responses:
+        '200':
+          description: Интерпретация текущей реплики
+          headers:
+            X-Prompt-Version:
+              description: Версия промпта interpret
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterpretResult' }
+              example:
+                intent: known_product
+                product_query: MDaemon
+                updates:
+                  - { op: set, field: license_kind, value: new, evidence: новая лицензия }
+                  - { op: set, field: seats, value: 50, evidence: 50 пользователей }
+                clarification_candidates: [license_term_months]
+                model_version: qwen3-32b-awq-base
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /internal/v1/compose:
+    post:
+      operationId: compose
+      summary: Составить пояснение по подтверждённым фактам
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ComposeRequest' }
+      responses:
+        '200':
+          description: SSE с проверяемыми блоками. Поток завершает complete или failed.
+          content:
+            text/event-stream:
+              schema: { type: string }
+              x-sse-events:
+                block: { $ref: '#/components/schemas/Block' }
+                complete: { $ref: '#/components/schemas/Complete' }
+                failed: { $ref: '#/components/schemas/Error' }
+              examples:
+                completed: { externalValue: ./examples/internal-compose.sse }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /health/live:
+    get:
+      operationId: mlLiveness
+      security: []
+      responses:
+        '200': { $ref: '#/components/responses/Health' }
+  /health/ready:
+    get:
+      operationId: mlReadiness
+      security: []
+      responses:
+        '200': { $ref: '#/components/responses/Health' }
+        '503': { $ref: '#/components/responses/Health' }
+components:
+  securitySchemes:
+    serviceBearer:
+      type: http
+      scheme: bearer
+  responses:
+    Error:
+      description: Внутренняя ошибка до открытия SSE
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Health:
+      description: Локальная проверка процесса и конфигурации
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status: { enum: [up, down] }
+  schemas:
+    RequestId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    DeadlineMs:
+      type: integer
+      minimum: 1
+      description: Остаток дедлайна хода. Сервис ограничивает ожидание 90 000 мс.
+    PositiveInt: { type: integer, minimum: 1 }
+    Budget: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
+    LicenseKind: { enum: [new, renewal] }
+    RequirementField:
+      enum: [product_name, edition, license_kind, seats, license_term_months, deployment, platform, budget_rub, domestic_required, use_case]
+    Requirements:
+      type: object
+      additionalProperties: false
+      properties:
+        product_name: { type: string }
+        edition: { type: string }
+        license_kind: { $ref: '#/components/schemas/LicenseKind' }
+        seats: { $ref: '#/components/schemas/PositiveInt' }
+        license_term_months: { $ref: '#/components/schemas/PositiveInt' }
+        deployment: { type: string }
+        platform: { type: string }
+        budget_rub: { $ref: '#/components/schemas/Budget' }
+        domestic_required: { type: boolean }
+        use_case: { type: string }
+    InterpretRequest:
+      type: object
+      required: [request_id, deadline_ms, text, conversation_context, requirements]
+      properties:
+        request_id: { $ref: '#/components/schemas/RequestId' }
+        deadline_ms: { $ref: '#/components/schemas/DeadlineMs' }
+        text:
+          type: string
+          minLength: 1
+          maxLength: 8000
+          pattern: '\S'
+          description: Полный текст текущей реплики пользователя.
+        conversation_context:
+          type: array
+          maxItems: 8
+          description: Релевантные предыдущие реплики в порядке диалога
+          items:
+            type: object
+            required: [role, text]
+            properties:
+              role: { enum: [user, assistant] }
+              text: { type: string, maxLength: 4000 }
+        requirements: { $ref: '#/components/schemas/Requirements' }
+    InterpretResult:
+      type: object
+      required: [intent, product_query, updates, clarification_candidates, model_version]
+      properties:
+        intent: { enum: [known_product, needs_solution, product_question] }
+        product_query:
+          type: [string, 'null']
+          description: Нормализованный запрос или null, если данных для него пока мало.
+        updates:
+          type: array
+          items: { $ref: '#/components/schemas/RequirementUpdate' }
+        clarification_candidates:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RequirementField' }
+        model_version: { type: string }
+    RequirementUpdate:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [op, field]
+          properties:
+            op: { const: clear }
+            field: { $ref: '#/components/schemas/RequirementField' }
+        - type: object
+          additionalProperties: false
+          required: [op, field, value, evidence]
+          properties:
+            op: { const: set }
+            field: { $ref: '#/components/schemas/RequirementField' }
+            value: {}
+            evidence:
+              type: string
+              minLength: 1
+              maxLength: 240
+              pattern: '\S'
+              description: Точная цитата из текущей реплики пользователя.
+          oneOf:
+            - properties:
+                field: { enum: [product_name, edition, deployment, platform, use_case] }
+                value: { type: string, minLength: 1 }
+            - properties:
+                field: { enum: [seats, license_term_months] }
+                value: { $ref: '#/components/schemas/PositiveInt' }
+            - properties:
+                field: { const: license_kind }
+                value: { $ref: '#/components/schemas/LicenseKind' }
+            - properties:
+                field: { const: budget_rub }
+                value: { $ref: '#/components/schemas/Budget' }
+            - properties:
+                field: { const: domestic_required }
+                value: { type: boolean }
+    ComposeRequest:
+      type: object
+      required: [request_id, deadline_ms, outcome, facts, language]
+      properties:
+        request_id: { $ref: '#/components/schemas/RequestId' }
+        deadline_ms: { $ref: '#/components/schemas/DeadlineMs' }
+        outcome: { enum: [clarify, recommend, answer, insufficient_data] }
+        facts:
+          type: array
+          maxItems: 16
+          description: Подтверждённые факты с уникальными идентификаторами.
+          items:
+            type: object
+            required: [id, text]
+            properties:
+              id: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
+              text: { type: string, minLength: 1, maxLength: 2000, pattern: '\S' }
+        language: { type: string, minLength: 2, maxLength: 32 }
+    Block:
+      type: object
+      required: [text, fact_ids]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 2000 }
+        fact_ids:
+          description: Ссылки на факты запроса. В recommend и answer требуется хотя бы одна ссылка.
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
+    Complete:
+      type: object
+      required: [model_version, prompt_version]
+      properties:
+        model_version: { type: string }
+        prompt_version: { type: string }
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        request_id: { $ref: '#/components/schemas/RequestId' }
