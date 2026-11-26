@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: support-agent
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/support}
+    username: ${SPRING_DATASOURCE_USERNAME:support}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    hikari:
+      connection-timeout: 3000
+
+catalog:
+  feed-url: ${CATALOG_FEED_URL:}
+  feed-file: ${CATALOG_FEED_FILE:}
+  sync-cron: ${CATALOG_SYNC_CRON:0 0 4 * * *}
+  sync-zone: ${CATALOG_SYNC_ZONE:Europe/Moscow}

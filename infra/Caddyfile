@@ -1,0 +1,14 @@
+{$SITE_ADDRESS} {
+    @backend path /api/* /health/*
+    handle @backend {
+        reverse_proxy backend:8080 {
+            flush_interval -1
+        }
+    }
+
+    handle {
+        root * /srv/frontend/dist
+        try_files {path} /index.html
+        file_server
+    }
+}

@@ -1,0 +1,304 @@
+openapi: 3.1.0
+info:
+  title: Softline Support Chat
+  version: 0.1.0
+  description: Публичный контракт прототипа. Браузер и API используют один origin.
+security:
+  - sessionCookie: []
+paths:
+  /api/v1/sessions:
+    post:
+      operationId: createSession
+      summary: Открыть сессию
+      description: Изменяющие запросы проверяются по заголовку Origin.
+      security: []
+      responses:
+        '201':
+          description: Сессия создана
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: Токен softline_session с атрибутами HttpOnly, Secure и SameSite=Lax.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id]
+                properties:
+                  session_id: { $ref: '#/components/schemas/Uuid' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/v1/sessions/{session_id}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      operationId: getSession
+      summary: Прочитать состояние сессии и историю
+      responses:
+        '200':
+          description: Сохранённая история, выбранное предложение и состояние хода
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/sessions/{session_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      operationId: submitMessage
+      summary: Принять сообщение и выдать SSE
+      description: >-
+        Повтор с прежним идентификатором и тем же телом возвращает сохранённый результат.
+        Если ход ещё идёт, возвращается 409 TURN_IN_PROGRESS с turn_id.
+        При повторном использовании идентификатора с другим телом возвращается
+        409 IDEMPOTENCY_CONFLICT. Для повтора завершившегося ошибкой хода
+        используется новый client_message_id, исходный text и retry_of_turn_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_message_id, text]
+              properties:
+                client_message_id: { $ref: '#/components/schemas/Uuid' }
+                text: { type: string, minLength: 1, pattern: '\S' }
+                retry_of_turn_id: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: >-
+            SSE с JSON в data. Поток начинает accepted и завершает done или failed.
+            Между ними возможны status, delta и heartbeat-комментарии.
+          content:
+            text/event-stream:
+              schema: { type: string }
+              x-sse-events:
+                accepted: { $ref: '#/components/schemas/AcceptedEvent' }
+                status: { $ref: '#/components/schemas/StatusEvent' }
+                delta: { $ref: '#/components/schemas/DeltaEvent' }
+                done: { $ref: '#/components/schemas/DoneEvent' }
+                failed: { $ref: '#/components/schemas/FailedEvent' }
+              examples:
+                clarification: { externalValue: ./examples/public-clarify.sse }
+                recommendation: { externalValue: ./examples/public-recommend.sse }
+                failure: { externalValue: ./examples/public-failed.sse }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: Ход выполняется или идентификатор уже связан с другим телом
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                code: TURN_IN_PROGRESS
+                message: Текущий ход ещё выполняется.
+                request_id: req-0042
+                turn_id: e3d1701c-1210-4706-94cb-2b9ec088da3d
+        '429': { $ref: '#/components/responses/Error' }
+  /api/v1/sessions/{session_id}/selection:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      operationId: selectOffer
+      summary: Выбрать ранее показанное предложение
+      description: При существенном изменении возвращается 409 OFFER_CHANGED и актуальная карточка, когда она доступна.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [offer_id, catalog_version]
+              properties:
+                offer_id: { type: string, minLength: 1 }
+                catalog_version: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: Выбор сохранён
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OfferCard' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/sessions/{session_id}/quote-drafts:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      operationId: createQuoteDraft
+      summary: Сформировать черновик КП по сохранённому выбору
+      description: Опциональная функция. Доступность возвращает quotes_enabled в GET сессии.
+      responses:
+        '200':
+          description: Черновик PDF
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /health/live:
+    get:
+      operationId: liveness
+      security: []
+      responses:
+        '200': { $ref: '#/components/responses/Health' }
+  /health/ready:
+    get:
+      operationId: readiness
+      security: []
+      responses:
+        '200': { $ref: '#/components/responses/Health' }
+        '503': { $ref: '#/components/responses/Health' }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: softline_session
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Uuid' }
+  responses:
+    Error:
+      description: Ошибка до открытия SSE
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Health:
+      description: Состояние локального сервиса
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status: { enum: [up, down] }
+  schemas:
+    Uuid: { type: string, format: uuid }
+    Session:
+      type: object
+      required: [session_id, messages, selected_offer, last_turn, quotes_enabled]
+      properties:
+        session_id: { $ref: '#/components/schemas/Uuid' }
+        messages:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Message'
+              - required: [status]
+        selected_offer:
+          oneOf:
+            - $ref: '#/components/schemas/OfferCard'
+            - type: 'null'
+        last_turn:
+          oneOf:
+            - $ref: '#/components/schemas/Turn'
+            - type: 'null'
+        quotes_enabled: { type: boolean }
+    Turn:
+      type: object
+      required: [turn_id, status]
+      properties:
+        turn_id: { $ref: '#/components/schemas/Uuid' }
+        status: { enum: [running, complete, failed] }
+        outcome: { $ref: '#/components/schemas/Outcome' }
+        error_code: { type: string }
+    Message:
+      type: object
+      required: [id, role, text, cards, sources, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        role: { enum: [user, assistant] }
+        text: { type: string }
+        status: { enum: [streaming, complete, partial] }
+        cards: { type: array, items: { $ref: '#/components/schemas/OfferCard' } }
+        sources: { type: array, items: { $ref: '#/components/schemas/Source' } }
+        created_at: { type: string, format: date-time }
+    OfferCard:
+      type: object
+      required: [offer_id, catalog_version, name, product_url, price, availability, attributes, source_ids]
+      properties:
+        offer_id: { type: string, minLength: 1 }
+        catalog_version: { $ref: '#/components/schemas/Uuid' }
+        name: { type: string }
+        product_url: { type: string, format: uri, pattern: '^https://' }
+        price:
+          oneOf:
+            - $ref: '#/components/schemas/Price'
+            - type: 'null'
+        availability: { enum: [available, unavailable, unknown] }
+        attributes: { type: object }
+        source_ids: { type: array, items: { type: string } }
+    Price:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+    Source:
+      type: object
+      required: [id, title, url, kind]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        url: { type: string, format: uri, pattern: '^https://' }
+        kind: { enum: [catalog, store, knowledge] }
+        snapshot_at: { type: string, format: date-time }
+        checked_at: { type: string, format: date-time }
+      anyOf:
+        - required: [snapshot_at]
+        - required: [checked_at]
+    Outcome: { enum: [clarify, recommend, answer, insufficient_data] }
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        request_id: { type: string }
+        turn_id: { $ref: '#/components/schemas/Uuid' }
+        updated_offer: { $ref: '#/components/schemas/OfferCard' }
+    AcceptedEvent:
+      type: object
+      required: [turn_id, client_message_id, user_message_id, request_id]
+      properties:
+        turn_id: { $ref: '#/components/schemas/Uuid' }
+        client_message_id: { $ref: '#/components/schemas/Uuid' }
+        user_message_id: { $ref: '#/components/schemas/Uuid' }
+        request_id: { type: string }
+    StatusEvent:
+      type: object
+      required: [stage]
+      properties:
+        stage: { enum: [interpreting, searching, generating] }
+    DeltaEvent:
+      type: object
+      required: [seq, text]
+      properties:
+        seq: { type: integer, minimum: 1 }
+        text: { type: string, minLength: 1 }
+    DoneEvent:
+      type: object
+      required: [turn_id, outcome, message]
+      properties:
+        turn_id: { $ref: '#/components/schemas/Uuid' }
+        outcome: { $ref: '#/components/schemas/Outcome' }
+        message: { $ref: '#/components/schemas/Message' }
+    FailedEvent:
+      type: object
+      required: [turn_id, code, message, retryable]
+      properties:
+        turn_id: { $ref: '#/components/schemas/Uuid' }
+        code: { type: string }
+        message: { type: string }
+        retryable: { type: boolean }

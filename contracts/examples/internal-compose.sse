@@ -1,0 +1,6 @@
+event: block
+data: {"text":"В примере один пакет покрывает 50 пользователей.","fact_ids":["demo-seats"]}
+
+event: complete
+data: {"model_version":"qwen3-32b-awq-base","prompt_version":"compose-1"}
+

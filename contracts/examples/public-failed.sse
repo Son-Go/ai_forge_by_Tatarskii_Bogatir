@@ -1,0 +1,9 @@
+event: accepted
+data: {"turn_id":"bb4ce9b1-bcc1-4dad-abd0-fac92be5a278","client_message_id":"4aa3dd48-466c-4d2b-96d1-b29537fefb5a","user_message_id":"5bbde03f-c061-432f-a7a8-2bbc649192db","request_id":"req-0044"}
+
+event: status
+data: {"stage":"interpreting"}
+
+event: failed
+data: {"turn_id":"bb4ce9b1-bcc1-4dad-abd0-fac92be5a278","code":"MODEL_TIMEOUT","message":"Время ожидания ответа истекло.","retryable":true}
+
