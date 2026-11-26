@@ -73,10 +73,9 @@ class RunpodClient:
             ],
             "stream": stream,
             "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
             "max_tokens": 1_024 if stream else 768,
         }
-        if self.settings.runpod_send_chat_template_kwargs:
-            body["chat_template_kwargs"] = {"enable_thinking": False}
         if not stream and self.settings.runpod_response_format == "json_schema":
             body["response_format"] = {
                 "type": "json_schema",

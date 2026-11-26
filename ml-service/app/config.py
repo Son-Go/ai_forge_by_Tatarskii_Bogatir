@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     runpod_model_version: SettingText | None = None
     runpod_max_concurrency: int = Field(default=1, ge=1, le=16)
     runpod_response_format: Literal["prompt", "json_schema"] = "prompt"
-    runpod_send_chat_template_kwargs: bool = False
     ml_max_context_bytes: int = Field(default=24_000, ge=4_000, le=100_000)
 
     @field_validator("ml_service_token", "runpod_api_key")
