@@ -154,6 +154,7 @@ paths:
   /health/ready:
     get:
       operationId: readiness
+      description: Возвращает 200 при доступном активном снимке PostgreSQL и 503 при отсутствии снимка или недоступной БД.
       security: []
       responses:
         '200': { $ref: '#/components/responses/Health' }
