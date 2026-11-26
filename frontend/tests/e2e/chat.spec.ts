@@ -16,7 +16,7 @@ test('streams a recommendation, selects it, and restores history', async ({ page
   await expect(page.getByRole('article', { name: 'Вы', exact: true })).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Новый диалог', exact: true })).toBeEnabled()
   await expect(page.locator('html')).toHaveJSProperty('scrollWidth', await page.locator('html').evaluate((el) => el.clientWidth))
-  await page.screenshot({ path: testInfo.outputPath('chat.png'), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath('chat.png'), fullPage: true, animations: 'disabled' })
   expect(errors).toEqual([])
 })
 

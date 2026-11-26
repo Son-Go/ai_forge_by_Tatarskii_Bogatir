@@ -2,8 +2,8 @@ import type { Offer, Source } from '../../shared/api/types'
 import { attributes, formatPrice, safeUrl } from '../../shared/lib/presentation'
 import { Icon } from '../../shared/ui/Icon'
 
-export function OfferCard({ offer, sources = [], selected, disabled, onSelect }: {
-  offer: Offer; sources?: Source[]; selected: boolean; disabled: boolean; onSelect: (offer: Offer) => void
+export function OfferCard({ offer, sources = [], selected = false, disabled = false, onSelect, readOnly = false }: {
+  offer: Offer; sources?: Source[]; selected?: boolean; disabled?: boolean; onSelect?: (offer: Offer) => void; readOnly?: boolean
 }) {
   const url = safeUrl(offer.product_url)
   const source = sources.find((s) => offer.source_ids.includes(s.id))
@@ -16,7 +16,7 @@ export function OfferCard({ offer, sources = [], selected, disabled, onSelect }:
     <p className={`availability availability-${offer.availability}`}><span className="availability-dot" aria-hidden="true" />{({ available: 'Доступно по данным каталога', unavailable: 'Недоступно по данным каталога', unknown: 'Наличие требует уточнения' })[offer.availability]}</p>
     {source?.snapshot_at && <p className="muted">Цена и наличие относятся к снимку источника.</p>}
     </div>
-    <div className="offer-actions"><button type="button" className="offer-select" disabled={disabled || selected} onClick={() => onSelect(offer)}>{selected && <Icon name="check" />}{selected ? 'Выбрано' : 'Выбрать'}</button>
+    <div className="offer-actions">{!readOnly && onSelect && <button type="button" className="offer-select" disabled={disabled || selected} onClick={() => onSelect(offer)}>{selected && <Icon name="check" />}{selected ? 'Выбрано' : 'Выбрать'}</button>}
       {url && <a href={url} target="_blank" rel="noopener noreferrer">Открыть в Store<Icon name="external" /></a>}
     </div>
   </article>
