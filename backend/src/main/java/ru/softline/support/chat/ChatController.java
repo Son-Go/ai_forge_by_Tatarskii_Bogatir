@@ -15,16 +15,13 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
-import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.CookieValue;
-import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
@@ -65,12 +62,18 @@ class ChatController {
         return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store").body(store.read(id, token));
     }
 
+    @GetMapping("/{id}/handoff")
+    ResponseEntity<HandoffStatus> handoffStatus(@PathVariable UUID id,
+                                               @CookieValue(value = COOKIE, required = false) String token) {
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store").body(store.handoffStatus(id, token));
+    }
+
     @PostMapping(value = "/{id}/messages", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     ResponseEntity<SseEmitter> message(@PathVariable UUID id, @RequestBody Send send, HttpServletRequest request,
                                        @CookieValue(value = COOKIE, required = false) String token) {
         requireOrigin(request);
         if (send.clientMessageId() == null || send.text() == null || send.text().isBlank()
-                || send.text().length() > 4_000) throw invalid();
+                || send.text().length() > 4_000) throw ChatErrors.invalid();
         rate.take("message:" + request.getRemoteAddr(), 90);
         rate.take("session:" + id, 30);
         return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store")
@@ -82,7 +85,7 @@ class ChatController {
                     @CookieValue(value = COOKIE, required = false) String token) {
         requireOrigin(request);
         if (selection.catalogVersion() == null || selection.offerId() == null || selection.offerId().isBlank()
-                || selection.offerId().length() > 256) throw invalid();
+                || selection.offerId().length() > 256) throw ChatErrors.invalid();
         rate.take("session:" + id, 30);
         return store.select(id, token, selection);
     }
@@ -95,28 +98,10 @@ class ChatController {
         throw new ChatError(404, "QUOTES_DISABLED", "Черновики КП пока недоступны.");
     }
 
-    @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
-    ResponseEntity<Map<String, Object>> invalidRequest() { return error(invalid()); }
-
-    @ExceptionHandler(ChatError.class)
-    ResponseEntity<Map<String, Object>> error(ChatError error) {
-        Map<String, Object> body = new HashMap<>();
-        body.put("code", error.code);
-        body.put("message", error.getMessage());
-        body.put("request_id", UUID.randomUUID().toString());
-        if (error.turnId != null) body.put("turn_id", error.turnId);
-        if (error.updatedOffer != null) body.put("updated_offer", error.updatedOffer);
-        return ResponseEntity.status(error.status).contentType(MediaType.APPLICATION_JSON).body(body);
-    }
-
     private void requireOrigin(HttpServletRequest request) {
         if (!origin.equals(request.getHeader(HttpHeaders.ORIGIN))) {
             throw new ChatError(403, "INVALID_ORIGIN", "Источник запроса не разрешён.");
         }
-    }
-
-    private static ChatError invalid() {
-        return new ChatError(400, "INVALID_REQUEST", "Проверьте поля запроса и длину сообщения.");
     }
 
     private static final class RateWindow {

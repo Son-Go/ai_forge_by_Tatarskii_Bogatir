@@ -76,13 +76,32 @@ class ChatStore {
     public Session read(UUID id, String token) {
         lockOwner(id, token);
         expire(id);
-        List<Message> messages = db.sql("SELECT * FROM chat_messages WHERE session_id = ? ORDER BY ordinal")
-                .param(id).query(this::message).list();
         PublicTurn last = db.sql(TURNS + " WHERE t.session_id = ? ORDER BY t.deadline_at DESC LIMIT 1")
                 .param(id).query(this::turn).optional().map(Turn::publicView).orElse(null);
         JsonNode chosen = db.sql("SELECT COALESCE(selected_card, 'null'::jsonb)::text FROM chat_sessions WHERE session_id = ?")
                 .param(id).query(String.class).optional().map(this::tree).orElse(null);
-        return new Session(id, messages, chosen, last, false);
+        return new Session(id, messages(id, Long.MAX_VALUE), chosen, last, false);
+    }
+
+    List<Message> messages(UUID id, long throughOrdinal) {
+        return db.sql("SELECT * FROM chat_messages WHERE session_id = ? AND ordinal <= ? ORDER BY ordinal")
+                .params(id, throughOrdinal).query(this::message).list();
+    }
+
+    @Transactional
+    public HandoffStatus handoffStatus(UUID id, String token) {
+        lockOwner(id, token);
+        Handoff handoff = db.sql("""
+            SELECT handoff_id, reason, status, created_at FROM chat_handoffs WHERE session_id = ?
+            ORDER BY created_at DESC, handoff_id DESC LIMIT 1
+            """).param(id).query((rs, n) -> new Handoff(rs.getObject("handoff_id", UUID.class),
+                rs.getString("reason"), rs.getString("status"), instant(rs, "created_at"))).optional().orElse(null);
+        return new HandoffStatus(handoff);
+    }
+
+    String activeHandoffReason(UUID id) {
+        return db.sql("SELECT reason FROM chat_handoffs WHERE session_id = ? AND status <> 'resolved'")
+                .param(id).query(String.class).optional().orElse(null);
     }
 
     @Transactional
@@ -139,7 +158,7 @@ class ChatStore {
         return db.sql("""
             SELECT role, body FROM (
                 SELECT role, body, ordinal FROM chat_messages
-                WHERE session_id = ? AND status = 'complete' AND message_id <> ?
+                WHERE session_id = ? AND status = 'complete' AND message_id <> ? AND handoff_id IS NULL
                 ORDER BY ordinal DESC LIMIT 8
             ) messages ORDER BY ordinal
             """).params(turn.sessionId(), turn.userMessageId())
@@ -162,6 +181,7 @@ class ChatStore {
     public Done complete(Turn turn, Reply reply, Map<String, Object> requirements, boolean changed,
                          String modelVersion, String promptVersion) {
         lockRunning(turn);
+        if (reply.handoffReason() != null) saveHandoff(turn, reply);
         Message answer = db.sql("""
             UPDATE chat_messages SET status = 'complete', cards = CAST(? AS jsonb), sources = CAST(? AS jsonb)
             WHERE turn_id = ? RETURNING *
@@ -175,10 +195,27 @@ class ChatStore {
             UPDATE chat_sessions SET requirements = CAST(? AS jsonb), updated_at = now(),
                 selected_import_id = CASE WHEN ? THEN NULL ELSE selected_import_id END,
                 selected_offer_id = CASE WHEN ? THEN NULL ELSE selected_offer_id END,
-                selected_card = CASE WHEN ? THEN NULL ELSE selected_card END
+                selected_card = CASE WHEN ? THEN NULL ELSE selected_card END,
+                pending_offer = CASE WHEN ? THEN NULL ELSE pending_offer END
             WHERE session_id = ?
-            """).params(encode(requirements), changed, changed, changed, turn.sessionId()).update();
+            """).params(encode(requirements), changed, changed, changed, changed, turn.sessionId()).update();
         return new Done(turn.turnId(), reply.outcome(), answer);
+    }
+
+    private void saveHandoff(Turn turn, Reply reply) {
+        db.sql("""
+            INSERT INTO chat_handoffs (handoff_id, session_id, opening_turn_id, reason, status)
+            VALUES (?, ?, ?, ?, 'queued')
+            ON CONFLICT (session_id) WHERE status <> 'resolved' DO NOTHING
+            """).params(UUID.randomUUID(), turn.sessionId(), turn.turnId(), reply.handoffReason()).update();
+        UUID handoff = db.sql("SELECT handoff_id FROM chat_handoffs WHERE session_id = ? AND status <> 'resolved'")
+                .param(turn.sessionId()).query(UUID.class).single();
+        db.sql("UPDATE chat_messages SET handoff_id = ? WHERE message_id = ?")
+                .params(handoff, turn.userMessageId()).update();
+        db.sql("""
+            INSERT INTO chat_messages (message_id, session_id, turn_id, role, body, status, handoff_id)
+            VALUES (?, ?, ?, 'assistant', ?, 'complete', ?)
+            """).params(UUID.randomUUID(), turn.sessionId(), turn.turnId(), reply.facts().getFirst().text(), handoff).update();
     }
 
     @Transactional
@@ -199,7 +236,7 @@ class ChatStore {
         return new Done(turn.turnId(), turn.outcome(), message);
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = ChatError.class)
     public JsonNode select(UUID id, String token, Choose selection) {
         lockOwner(id, token);
         expire(id);
@@ -211,21 +248,33 @@ class ChatStore {
                 AND item->>'offer_id' = ? AND item->>'catalog_version' = ?
             ORDER BY ordinal DESC LIMIT 1
             """).params(id, selection.offerId(), selection.catalogVersion().toString()).query(String.class)
-                .optional().map(this::tree).orElseThrow(
-                        () -> new ChatError(404, "OFFER_NOT_SHOWN", "Такое предложение не показано в этой сессии."));
+                .optional().map(this::tree).orElseGet(() -> pendingOffer(id, selection));
         UUID active = catalog.activeVersion().orElseThrow(
                 () -> new ChatError(503, "CATALOG_UNAVAILABLE", "Каталог ещё загружается."));
         JsonNode current = catalog.card(active, selection.offerId()).orElse(null);
         boolean changed = current == null || !List.of("price", "availability", "attributes", "name", "product_url")
                 .stream().allMatch(field -> Objects.equals(previous.get(field), current.get(field)));
         if (changed || !"available".equals(current.path("availability").asText())) {
-            throw new ChatError(409, "OFFER_CHANGED", "Предложение изменилось. Проверьте параметры в каталоге.", null, current);
+            JsonNode replacement = current != null && "available".equals(current.path("availability").asText())
+                    ? current : null;
+            db.sql("UPDATE chat_sessions SET pending_offer = CAST(? AS jsonb) WHERE session_id = ?")
+                    .params(encode(replacement), id).update();
+            throw new ChatError(409, "OFFER_CHANGED", "Предложение изменилось. Проверьте параметры в каталоге.", null, replacement);
         }
         db.sql("""
             UPDATE chat_sessions SET selected_import_id = ?, selected_offer_id = ?, selected_card = CAST(? AS jsonb),
-                updated_at = now() WHERE session_id = ?
+                pending_offer = NULL, updated_at = now() WHERE session_id = ?
             """).params(active, selection.offerId(), encode(current), id).update();
         return current;
+    }
+
+    private JsonNode pendingOffer(UUID id, Choose selection) {
+        return db.sql("""
+            SELECT pending_offer::text FROM chat_sessions
+            WHERE session_id = ? AND pending_offer->>'offer_id' = ? AND pending_offer->>'catalog_version' = ?
+            """).params(id, selection.offerId(), selection.catalogVersion().toString()).query(String.class)
+                .optional().map(this::tree).orElseThrow(
+                        () -> new ChatError(404, "OFFER_NOT_SHOWN", "Такое предложение не показано в этой сессии."));
     }
 
     private void lockOwner(UUID id, String token) {
@@ -236,7 +285,7 @@ class ChatStore {
         }
     }
 
-    private void requireIdle(UUID id) {
+    void requireIdle(UUID id) {
         db.sql("SELECT turn_id FROM chat_turns WHERE session_id = ? AND status = 'running'")
                 .param(id).query(UUID.class).optional().ifPresent(turn -> { throw inProgress(turn); });
     }
@@ -245,19 +294,22 @@ class ChatStore {
         return new ChatError(409, "TURN_IN_PROGRESS", "Текущий ход ещё выполняется.", id, null);
     }
 
-    private void expire(UUID id) {
+    void expire(UUID id) {
         db.sql(EXPIRE.formatted("AND session_id = ?")).param(id).update();
     }
 
     private void lockRunning(Turn turn) {
-        db.sql("SELECT session_id FROM chat_sessions WHERE session_id = ? FOR UPDATE")
-                .param(turn.sessionId()).query(UUID.class).single();
+        lockSession(turn.sessionId());
         if (db.sql("""
             SELECT turn_id FROM chat_turns WHERE turn_id = ? AND status = 'running'
                 AND deadline_at > clock_timestamp() FOR UPDATE
             """).param(turn.turnId()).query(UUID.class).optional().isEmpty()) {
             throw new ChatError(409, "TURN_TIMEOUT", "Время хода истекло.");
         }
+    }
+
+    void lockSession(UUID id) {
+        db.sql("SELECT session_id FROM chat_sessions WHERE session_id = ? FOR UPDATE").param(id).query(UUID.class).single();
     }
 
     private static String tokenHash(String text) {
@@ -277,10 +329,12 @@ class ChatStore {
                 rs.getBoolean("retryable"), rs.getString("user_text"));
     }
 
-    private Message message(ResultSet rs, int row) throws SQLException {
-        return new Message(rs.getObject("message_id", UUID.class), rs.getString("role"), rs.getString("body"),
+    Message message(ResultSet rs, int row) throws SQLException {
+        String role = rs.getString("role");
+        String sender = "assistant".equals(role) && rs.getObject("turn_id") == null ? "manager" : null;
+        return new Message(rs.getObject("message_id", UUID.class), role, rs.getString("body"),
                 rs.getString("status"), decode(rs.getString("cards"), new TypeReference<>() {}),
-                decode(rs.getString("sources"), new TypeReference<>() {}), instant(rs, "created_at"));
+                decode(rs.getString("sources"), new TypeReference<>() {}), instant(rs, "created_at"), sender);
     }
 
     private static Instant instant(ResultSet rs, String field) throws SQLException {

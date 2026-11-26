@@ -1,4 +1,4 @@
-"""Regression check for a persisted partial answer after an upstream SSE timeout."""
+"""Check chat timings, cold and warm budgets, and SSE recovery against a local ML stub."""
 
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,6 +62,22 @@ def port():
         return sock.getsockname()[1]
 
 
+def read_timing(log, stream):
+    accepted = next(block for block in stream.split("\n\n") if block.startswith("event:accepted\n"))
+    event = json.loads(next(line.removeprefix("data:") for line in accepted.splitlines() if line.startswith("data:")))
+    entries = [line.partition("Chat turn timing ")[2] for line in log.read_text().splitlines()
+               if f"Chat turn timing request_id={event['request_id']} " in line]
+    assert len(entries) == 1, entries
+    timing = dict(field.split("=", 1) for field in entries[0].split())
+    assert timing["turn_id"] == event["turn_id"]
+    total = int(timing["total_ms"])
+    for name in ("interpret_ms", "search_ms", "compose_ms", "first_delta_ms"):
+        assert 0 <= int(timing[name]) <= total, timing
+    assert int(timing["interpret_ms"]) <= int(timing["first_delta_ms"]), timing
+    assert timing["compose_fallback"] == "false", timing
+    return timing
+
+
 def run(args):
     origin = f"http://127.0.0.1:{port()}"
     with tempfile.TemporaryDirectory() as tmp, ThreadingHTTPServer(("127.0.0.1", 0), MockMl) as mock:
@@ -123,24 +139,37 @@ def run(args):
                 assert events[0] == "accepted" and "delta" in events, events
                 answer = history["messages"][-1]
                 assert answer["role"] == "assistant" and answer["text"]
+                timing = read_timing(log, stream)
                 if args.cold_delay:
                     elapsed = time.monotonic() - started
                     assert events[-1] == "done" and answer["status"] == "complete", events
+                    assert timing["budget"] == "cold" and timing["budget_ms"] == "120000", timing
+                    assert timing["outcome"] == "recommend" and timing["error_code"] == "null", timing
+                    assert int(timing[f"{args.cold_stage}_ms"]) >= args.cold_delay * 1000, timing
+                    assert int(timing["first_delta_ms"]) >= args.cold_delay * 1000, timing
                     assert args.cold_delay <= elapsed < 120
                     assert args.cold_delay * 1000 < mock.cold_budget <= 120_000
                     assert 110_000 < mock.interpret_budgets[0] <= 120_000
                     assert any(line.startswith(":") and "waiting" in line for line in stream.splitlines())
-                    for idle_seconds, lower, upper in ((0, 85_000, 90_000), (2.2, 110_000, 120_000)):
+                    for idle_seconds, mode, lower, upper in ((0, "warm", 85_000, 90_000), (2.2, "cold", 110_000, 120_000)):
                         time.sleep(idle_seconds)
                         followup = json.dumps({"client_message_id": str(uuid.uuid4()), "text": "DemoMail"}).encode()
                         with urlopen(Request(url + "/messages", followup, headers), timeout=10) as response:
-                            assert "event:done" in response.read().decode()
+                            followup_stream = response.read().decode()
+                        assert "event:done" in followup_stream
+                        followup_timing = read_timing(log, followup_stream)
+                        assert followup_timing["budget"] == mode and int(followup_timing["budget_ms"]) == upper, followup_timing
                         assert lower < mock.interpret_budgets[-1] <= upper, mock.interpret_budgets
                     print(f"PASS: cold {args.cold_stage} {elapsed:.1f} s with SSE heartbeat; budgets {mock.interpret_budgets}")
                 else:
                     assert events[-1] == "failed" and answer["status"] == "partial", events
                     assert history["last_turn"]["error_code"] == "TURN_TIMEOUT", history["last_turn"]
+                    assert timing["error_code"] == "TURN_TIMEOUT" and timing["outcome"] == "null", timing
+                    assert timing["budget"] == "cold" and timing["budget_ms"] == "3000", timing
+                    assert int(timing["first_delta_ms"]) < int(timing["total_ms"]), timing
                     print("PASS: streamed block retained as partial after model timeout")
+                summary = ("interpret_ms", "search_ms", "compose_ms", "first_delta_ms", "total_ms", "error_code")
+                print(" ".join(f"{name}={timing[name]}" for name in summary))
             except (AssertionError, HTTPError, URLError):
                 print(log.read_text()[-4000:])
                 raise

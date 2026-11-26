@@ -58,9 +58,10 @@ class ChatFlow {
 
     SseEmitter open(UUID id, String token, Send input) {
         if (!capacity.tryAcquire()) throw new ChatError(429, "TURN_LIMIT", "Сервис занят. Повторите запрос чуть позже.");
+        long startedNanos = System.nanoTime();
         long lastResponse = lastModelResponse.get();
-        long timeoutMillis = lastResponse == Long.MIN_VALUE || System.nanoTime() - lastResponse >= modelIdleNanos
-                ? coldTimeoutMillis : warmTimeoutMillis;
+        boolean cold = lastResponse == Long.MIN_VALUE || System.nanoTime() - lastResponse >= modelIdleNanos;
+        long timeoutMillis = cold ? coldTimeoutMillis : warmTimeoutMillis;
         Accepted accepted;
         try {
             accepted = store.reserve(id, token, input, timeoutMillis);
@@ -73,13 +74,15 @@ class ChatFlow {
         AtomicBoolean finished = new AtomicBoolean();
         AtomicBoolean disconnected = new AtomicBoolean();
         Thread worker = Thread.ofVirtual().unstarted(() -> {
+            TurnTiming timing = new TurnTiming(startedNanos);
             try {
-                process(accepted, emitter);
+                process(accepted, emitter, timing);
             } catch (IOException | UncheckedIOException ex) {
                 disconnected.set(true);
             } catch (InterruptedException ex) {
                 Thread.interrupted();
                 String code = disconnected.get() ? "CLIENT_DISCONNECTED" : "TURN_TIMEOUT";
+                timing.errorCode = code;
                 if (!accepted.replay()) recordFailure(turn, code);
                 if (!disconnected.get()) sendFailure(emitter, turn, code, true);
             } catch (RuntimeException ex) {
@@ -87,15 +90,20 @@ class ChatFlow {
                 String code = disconnected.get() ? "CLIENT_DISCONNECTED"
                         : interrupted || !Instant.now().isBefore(turn.deadline()) ? "TURN_TIMEOUT"
                         : ex instanceof ChatError error ? error.code : "TURN_FAILED";
+                timing.errorCode = code;
                 log.warn("Chat turn failure request_id={} turn_id={} code={}", turn.requestId(), turn.turnId(), code);
                 if (!accepted.replay()) recordFailure(turn, code);
                 if (!disconnected.get()) sendFailure(emitter, turn, code, true);
             } finally {
                 try {
-                    if (disconnected.get() && !accepted.replay()) recordFailure(turn, "CLIENT_DISCONNECTED");
+                    if (disconnected.get() && !accepted.replay()) {
+                        timing.errorCode = "CLIENT_DISCONNECTED";
+                        recordFailure(turn, timing.errorCode);
+                    }
                 } finally {
                     finished.set(true);
                     capacity.release();
+                    if (!accepted.replay()) timing.writeLog(turn, cold, timeoutMillis);
                     emitter.complete();
                 }
             }
@@ -125,7 +133,7 @@ class ChatFlow {
         return emitter;
     }
 
-    private void process(Accepted accepted, SseEmitter emitter) throws IOException, InterruptedException {
+    private void process(Accepted accepted, SseEmitter emitter, TurnTiming timing) throws IOException, InterruptedException {
         Turn turn = accepted.turn();
         send(emitter, "accepted", Map.of("turn_id", turn.turnId(), "client_message_id", turn.clientMessageId(),
                 "user_message_id", turn.userMessageId(), "request_id", turn.requestId()));
@@ -134,45 +142,79 @@ class ChatFlow {
             else sendFailure(emitter, turn, turn.code(), turn.retryable());
             return;
         }
-        send(emitter, "status", Map.of("stage", "interpreting"));
         Map<String, Object> old = store.requirements(turn);
+        String activeHandoff = store.activeHandoffReason(turn.sessionId());
+        Reply direct = activeHandoff == null ? planner.explicitHandoff(turn.userText())
+                : Reply.handoff(activeHandoff, "Сообщение добавлено к обращению. Менеджер увидит его в этом диалоге.");
+        if (direct != null) {
+            Done answer = store.complete(turn, direct, old, false, null, null);
+            send(emitter, "done", answer);
+            timing.outcome = answer.outcome();
+            return;
+        }
+        send(emitter, "status", Map.of("stage", "interpreting"));
+        List<Map<String, String>> context = store.context(turn);
         MlClient.Interpretation interpretation;
         try {
-            interpretation = ml.interpret(turn, old, store.context(turn));
+            long interpretationStarted = System.nanoTime();
+            try {
+                interpretation = ml.interpret(turn, old, context);
+            } finally {
+                timing.interpretMs = elapsedMillis(interpretationStarted);
+            }
             lastModelResponse.accumulateAndGet(System.nanoTime(), Math::max);
         } catch (IOException ex) {
             requireActive(turn);
             String code = ex instanceof java.net.http.HttpTimeoutException ? "TURN_TIMEOUT" : "ML_UNAVAILABLE";
+            timing.errorCode = code;
             recordFailure(turn, code);
             sendFailure(emitter, turn, code, true);
             return;
         }
-        Map<String, Object> next = planner.apply(old, interpretation, turn.userText());
-        send(emitter, "status", Map.of("stage", "searching"));
-        Reply reply = planner.plan(turn, interpretation, next);
+        long searchStarted = System.nanoTime();
+        Map<String, Object> next;
+        Reply reply;
+        try {
+            next = planner.apply(old, interpretation, turn.userText());
+            send(emitter, "status", Map.of("stage", "searching"));
+            reply = planner.plan(turn, interpretation, next);
+        } finally {
+            timing.searchMs = elapsedMillis(searchStarted);
+        }
         Set<String> sent = new HashSet<>();
         String promptVersion = null;
         if ("answer".equals(reply.outcome()) || "recommend".equals(reply.outcome())) {
             send(emitter, "status", Map.of("stage", "generating"));
             try {
-                promptVersion = ml.compose(turn, reply, block -> emitFactBlock(turn, emitter, reply.facts(), block, sent));
+                long compositionStarted = System.nanoTime();
+                try {
+                    promptVersion = ml.compose(turn, reply,
+                            block -> emitFactBlock(turn, emitter, reply.facts(), block, sent, timing));
+                } finally {
+                    timing.composeMs = elapsedMillis(compositionStarted);
+                }
                 lastModelResponse.accumulateAndGet(System.nanoTime(), Math::max);
             } catch (IOException ex) {
                 requireActive(turn);
+                timing.composeFallback = true;
                 log.info("Using verified facts request_id={} turn_id={}", turn.requestId(), turn.turnId());
             }
         }
         requireActive(turn);
-        for (Fact fact : reply.facts()) {
-            if (sent.add(fact.id())) append(turn, emitter, fact.text(), sent.size() > 1);
+        if (reply.handoffReason() == null) {
+            for (Fact fact : reply.facts()) {
+                if (sent.add(fact.id())) append(turn, emitter, fact.text(), sent.size() > 1, timing);
+            }
         }
         Map<String, Object> saved = "product_question".equals(interpretation.intent()) ? old : next;
         Done answer = store.complete(turn, reply, saved, !old.equals(saved), validVersion(interpretation.modelVersion()),
                 validVersion(promptVersion));
         send(emitter, "done", answer);
+        timing.outcome = answer.outcome();
     }
 
-    private void emitFactBlock(Turn turn, SseEmitter emitter, List<Fact> facts, JsonNode block, Set<String> sent) {
+    private void emitFactBlock(Turn turn, SseEmitter emitter, List<Fact> facts, JsonNode block, Set<String> sent,
+                               TurnTiming timing) {
         JsonNode ids = block.path("fact_ids");
         if (!ids.isArray() || ids.isEmpty()) return;
         var listed = StreamSupport.stream(ids.spliterator(), false)
@@ -184,16 +226,43 @@ class ChatFlow {
         for (var item : matched) {
             Fact fact = item.orElseThrow();
             if (sent.add(fact.id())) {
-                try { append(turn, emitter, fact.text(), sent.size() > 1); }
+                try { append(turn, emitter, fact.text(), sent.size() > 1, timing); }
                 catch (IOException ex) { throw new UncheckedIOException(ex); }
             }
         }
     }
 
-    private void append(Turn turn, SseEmitter emitter, String text, boolean subsequent) throws IOException {
+    private void append(Turn turn, SseEmitter emitter, String text, boolean subsequent, TurnTiming timing) throws IOException {
         String content = subsequent ? "\n\n" + text : text;
         int seq = store.append(turn, content);
         send(emitter, "delta", Map.of("seq", seq, "text", content));
+        if (timing.firstDeltaMs == null) timing.firstDeltaMs = elapsedMillis(timing.startedNanos);
+    }
+
+    private static long elapsedMillis(long since) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - since);
+    }
+
+    private static final class TurnTiming {
+        private final long startedNanos;
+        private Long interpretMs;
+        private Long searchMs;
+        private Long composeMs;
+        private Long firstDeltaMs;
+        private boolean composeFallback;
+        private String outcome;
+        private String errorCode;
+
+        TurnTiming(long startedNanos) {
+            this.startedNanos = startedNanos;
+        }
+
+        void writeLog(Turn turn, boolean cold, long budgetMillis) {
+            log.info("Chat turn timing request_id={} turn_id={} budget={} budget_ms={} interpret_ms={} search_ms={} "
+                            + "compose_ms={} first_delta_ms={} total_ms={} compose_fallback={} outcome={} error_code={}",
+                    turn.requestId(), turn.turnId(), cold ? "cold" : "warm", budgetMillis, interpretMs, searchMs,
+                    composeMs, firstDeltaMs, elapsedMillis(startedNanos), composeFallback, outcome, errorCode);
+        }
     }
 
     private static String validVersion(String name) {

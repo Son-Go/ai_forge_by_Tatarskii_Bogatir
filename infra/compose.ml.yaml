@@ -1,6 +1,8 @@
 services:
   ml-service:
-    build: ../ml-service
+    build:
+      context: ..
+      target: ml-service
     environment:
       ML_SERVICE_TOKEN: ${ML_SERVICE_TOKEN:-}
       RUNPOD_API_KEY: ${RUNPOD_API_KEY:-}

@@ -11,7 +11,8 @@ final class ChatTypes {
     record Choose(String offerId, UUID catalogVersion) {}
     record Owner(UUID id, String token) {}
     record Message(UUID id, String role, String text, String status,
-                   List<JsonNode> cards, List<JsonNode> sources, Instant createdAt) {}
+                   List<JsonNode> cards, List<JsonNode> sources, Instant createdAt,
+                   @JsonInclude(JsonInclude.Include.NON_NULL) String sender) {}
     @JsonInclude(JsonInclude.Include.NON_NULL)
     record PublicTurn(UUID turnId, String status, String outcome, String errorCode) {}
     record Session(UUID sessionId, List<Message> messages, JsonNode selectedOffer, PublicTurn lastTurn,
@@ -25,10 +26,23 @@ final class ChatTypes {
     }
     record Accepted(Turn turn, boolean replay) {}
     record Done(UUID turnId, String outcome, Message message) {}
+    record Handoff(UUID handoffId, String reason, String status, Instant createdAt) {}
+    record QueueItem(UUID handoffId, UUID sessionId, String reason, String status, Instant createdAt) {}
+    record AssignedHandoff(QueueItem handoff, List<Message> messages) {}
+    record HandoffStatus(Handoff handoff) {}
+    record ManagerMessage(UUID messageId, String text) {}
     record Fact(String id, String text) {}
-    record Reply(String outcome, List<Fact> facts, List<JsonNode> cards, List<JsonNode> sources) {
+    record Reply(String outcome, List<Fact> facts, List<JsonNode> cards, List<JsonNode> sources, String handoffReason) {
+        Reply(String outcome, List<Fact> facts, List<JsonNode> cards, List<JsonNode> sources) {
+            this(outcome, facts, cards, sources, null);
+        }
+
         static Reply text(String outcome, String text) {
             return new Reply(outcome, List.of(new Fact("f1", text)), List.of(), List.of());
+        }
+
+        static Reply handoff(String reason, String text) {
+            return new Reply("insufficient_data", List.of(new Fact("f1", text)), List.of(), List.of(), reason);
         }
     }
 

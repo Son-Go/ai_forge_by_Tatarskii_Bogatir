@@ -57,13 +57,23 @@ class ReplyPlanner {
         return next;
     }
 
-    Reply plan(Turn turn, MlClient.Interpretation input, Map<String, Object> requirements) {
-        String text = normalize(turn.userText());
-        if ((text.contains("провер") || text.contains("подтверд"))
-                && (text.contains("наш документ") || text.contains("нашу справку")
-                    || text.contains("приложен") || text.contains("документы по заказу"))) {
-            return Reply.text("insufficient_data", "Для проверки документов по заказу нужно подтверждение менеджера.");
+    Reply explicitHandoff(String message) {
+        String text = normalize(message);
+        boolean documentReview = (text.contains("документ") || text.contains("справк"))
+                && (text.contains("проверь") || text.contains("проверить") || text.contains("проверка документ")
+                    || text.contains("проверите") || text.contains("подтвердите") || text.contains("подтвердить")
+                    || text.contains("согласуйте") || text.contains("согласовать"));
+        if (documentReview && !text.startsWith("какие документ")) {
+            return Reply.handoff("document_review", "Передали обращение менеджеру для проверки документов. "
+                    + "Он ответит в этом диалоге.");
         }
+        if (text.contains("под заказ") || text.contains("вне каталога") || text.contains("вне витрины")
+                || text.contains("нет в каталоге") || text.contains("нет на сайте")
+                || text.contains("не нашел на сайте") || text.contains("не нашла на сайте")) return offCatalog();
+        return null;
+    }
+
+    Reply plan(Turn turn, MlClient.Interpretation input, Map<String, Object> requirements) {
         String product = query(requirements.get("product_name"));
         String useCase = query(requirements.get("use_case"));
         String modelQuery = query(input.productQuery());
@@ -78,8 +88,9 @@ class ReplyPlanner {
             found = catalog.find(turn.catalogVersion(), modelQuery, true);
         }
         if (found.isEmpty()) {
+            if (known) return offCatalog();
             return Reply.text("insufficient_data", "Подходящую позицию в текущем каталоге подтвердить не удалось. "
-                    + "Уточните название или артикул. Возможность заказа вне витрины может проверить менеджер.");
+                    + "Уточните требования или название продукта.");
         }
         if (known && product != null) {
             List<Offer> exact = found.stream().filter(offer -> matchesProduct(offer, search)).toList();
@@ -110,6 +121,11 @@ class ReplyPlanner {
                     + "Некоторые запрошенные параметры отсутствуют в каталоге и требуют подтверждения.", filtered.subList(0, 1));
         }
         return offerReply("recommend", "По текущему снимку каталога найдены варианты с подтверждёнными параметрами.", confirmed);
+    }
+
+    private static Reply offCatalog() {
+        return Reply.handoff("off_catalog_order", "Передали запрос менеджеру, чтобы проверить возможность поставки. "
+                + "Если знаете производителя или артикул, напишите их здесь.");
     }
 
     private Reply question(Turn turn, String query, String product, String useCase) {

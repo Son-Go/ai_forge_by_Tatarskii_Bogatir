@@ -1,12 +1,15 @@
 # Локальный запуск
 
-Из корня скопируйте `infra/.env.example` в `infra/.env`, задайте пароль PostgreSQL и запустите Compose.
+При первом локальном запуске скопируйте `infra/.env.example` в `.env` в корне репозитория и задайте пароль PostgreSQL. Затем выполните из корня проекта.
 
 ```sh
-docker compose --env-file infra/.env -f infra/compose.yaml up --build
-curl --fail http://localhost:8080/health/ready
+docker compose up -d --build
+docker compose ps
+curl --fail http://localhost:8080/health/live
 ```
 
-Flyway применяет начальную схему при старте Java. Caddy проксирует API и health и раздаёт сборку из `frontend/dist/`, когда команда фронтенда её подготовит.
+Корневой Compose собирает цели `backend`, `ml-service` и `caddy` из общего [Dockerfile](../Dockerfile) и запускает PostgreSQL из образа `postgres:17`. Образ Caddy собирает фронтенд из зафиксированных зависимостей и раздаёт его по адресу `http://localhost:8080`. Flyway применяет схему при старте Java. `/health/ready` показывает `200` после появления активного снимка каталога.
 
-Конфигурация по умолчанию слушает loopback. Для публичного стенда задайте домен в `SITE_ADDRESS`, адрес привязки VPS в `EDGE_BIND` и порты 80 и 443. Добавление сервиса FastAPI в сеть Compose, настройка импорта и проверка провайдера модели входят в план интеграции.
+Для модельных ответов нужны активный каталог и настроенный профиль FastAPI. Задайте внутренний адрес `ML_BASE_URL=http://ml-service:8000` и общий `ML_SERVICE_TOKEN`. Переменная `ML_DATA_REGION=RU` подтверждает размещение всего контура обработки реальных сообщений в РФ. [Настройки бэкенда](../backend/README.md) · [Настройки FastAPI](../ml-service/README.md)
+
+Конфигурация по умолчанию слушает loopback. Для публичного стенда задайте домен в `SITE_ADDRESS`, адрес привязки VPS в `EDGE_BIND`, порты 80 и 443 и точный HTTPS-origin в `CHAT_PUBLIC_ORIGIN`.

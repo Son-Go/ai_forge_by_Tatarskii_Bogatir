@@ -15,7 +15,9 @@ services:
     restart: unless-stopped
 
   backend:
-    build: ../backend
+    build:
+      context: ..
+      target: backend
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/support
       SPRING_DATASOURCE_USERNAME: support
@@ -29,6 +31,7 @@ services:
       CHAT_TURN_TIMEOUT_MS: ${CHAT_TURN_TIMEOUT_MS:-90000}
       CHAT_COLD_TURN_TIMEOUT_MS: ${CHAT_COLD_TURN_TIMEOUT_MS:-120000}
       CHAT_MODEL_IDLE_MS: ${CHAT_MODEL_IDLE_MS:-15000}
+      MANAGER_ACCESS_TOKENS: ${MANAGER_ACCESS_TOKENS:-}
       FORWARD_HEADERS_STRATEGY: native
       ML_BASE_URL: ${ML_BASE_URL:-}
       ML_DATA_REGION: ${ML_DATA_REGION:-}
@@ -40,15 +43,15 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2
+    build:
+      context: ..
+      target: caddy
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
     ports:
       - "${EDGE_BIND:-127.0.0.1}:${EDGE_HTTP_PORT:-8080}:80"
       - "${EDGE_BIND:-127.0.0.1}:${EDGE_HTTPS_PORT:-8443}:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../frontend:/srv/frontend:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
