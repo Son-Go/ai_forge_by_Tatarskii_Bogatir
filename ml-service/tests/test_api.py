@@ -7,7 +7,7 @@ import pytest
 from starlette.requests import ClientDisconnect
 
 from app.config import Settings
-from app.main import create_app
+from app.main import create_app, make_deadline
 
 AUTH = {"Authorization": "Bearer service-test"}
 INTERPRET = {
@@ -139,6 +139,7 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
         )
         assert request.headers["Authorization"] == "Bearer provider-test"
         assert request.headers["X-Request-Id"] == INTERPRET["request_id"]
+        assert request.extensions["timeout"]["read"] == 120.0
         body = json.loads(request.content)
         assert body["model"] == "org/model-awq"
         assert body["stream"] is False
@@ -225,6 +226,14 @@ async def test_provider_error_contains_no_upstream_payload(settings):
     assert response.status_code == 503
     assert response.json()["code"] == "MODEL_UNAVAILABLE"
     assert "private provider text" not in response.text
+
+
+@pytest.mark.parametrize("remaining_ms, seconds", [(28_000, 28), (119_000, 119), (160_000, 120)])
+async def test_deadline_uses_remaining_budget_up_to_service_limit(remaining_ms, seconds):
+    clock = asyncio.get_running_loop().time
+    started = clock()
+    expires = make_deadline(remaining_ms)
+    assert started + seconds <= expires <= clock() + seconds
 
 
 @pytest.mark.parametrize("path, body", [("interpret", INTERPRET), ("compose", COMPOSE)])

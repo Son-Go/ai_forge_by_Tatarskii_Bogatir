@@ -267,7 +267,7 @@ def create_app(
         async with httpx.AsyncClient(
             base_url=f"https://api.runpod.ai/v2/{config.runpod_endpoint_id}/openai/v1/",
             headers={"Authorization": f"Bearer {config.runpod_api_key.get_secret_value()}"},
-            timeout=httpx.Timeout(90.0, connect=5.0),
+            timeout=httpx.Timeout(MAX_DEADLINE_MS / 1_000, connect=5.0),
             limits=httpx.Limits(max_connections=config.runpod_max_concurrency),
             transport=runpod_transport,
         ) as client:

@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, StringConstraints, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-MAX_DEADLINE_MS = 90_000
+MAX_DEADLINE_MS = 120_000
 
 SettingText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 EndpointId = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]+$")]

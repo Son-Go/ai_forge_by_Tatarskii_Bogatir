@@ -6,7 +6,9 @@ Spring Boot вызывает FastAPI по адресу `http://ml-service:8000` 
 - `POST /internal/v1/compose` возвращает SSE. Каждое событие `block` содержит законченный текст и ссылки на факты этого запроса. Поток завершается `complete` с версиями или `failed` с кодом ошибки. Spring Boot сверяет смысл утверждений с источниками перед отправкой текста в чат.
 - `GET /health/live` проверяет процесс. `GET /health/ready` проверяет загрузку локальной конфигурации. Оба маршрута работают без вызова GPU.
 
-Модельные запросы требуют `Authorization: Bearer <ML_SERVICE_TOKEN>`, `request_id` и остаток дедлайна `deadline_ms`. FastAPI учитывает ожидание свободного слота и ограничивает вызов 90 секундами. Ошибка входа возвращается с HTTP 400, ошибка авторизации — 401, проблема модели до начала потока — 503. Коды `MODEL_TIMEOUT`, `MODEL_UNAVAILABLE` и `MODEL_INVALID_OUTPUT` также передаются в SSE `failed`, если поток уже открыт. Закрытие внутреннего SSE закрывает соединение с RunPod. Обработку повторов хода выполняет Java.
+Модельные запросы требуют `Authorization: Bearer <ML_SERVICE_TOKEN>`, `request_id` и остаток дедлайна `deadline_ms`. В Spring Boot на весь ход по умолчанию отводится 120 секунд. FastAPI использует переданный остаток с верхней границей 120 секунд. Ожидание свободного слота, холодный запуск RunPod и генерация расходуют этот бюджет.
+
+Ошибка входа возвращается с HTTP 400, ошибка авторизации — 401, проблема модели до начала потока — 503. Коды `MODEL_TIMEOUT`, `MODEL_UNAVAILABLE` и `MODEL_INVALID_OUTPUT` также передаются в SSE `failed`, если поток уже открыт. Закрытие внутреннего SSE закрывает соединение с RunPod. Обработку повторов хода выполняет Java.
 
 ## Профиль RunPod
 
@@ -47,9 +49,9 @@ uv run --locked ruff check .
 ```sh
 curl --fail-with-body http://127.0.0.1:8000/internal/v1/interpret \
   -H "Authorization: Bearer ${ML_SERVICE_TOKEN}" -H 'Content-Type: application/json' \
-  --data '{"request_id":"smoke-interpret","deadline_ms":90000,"text":"Нужна новая лицензия MDaemon на 50 пользователей","conversation_context":[],"requirements":{}}'
+  --data '{"request_id":"smoke-interpret","deadline_ms":120000,"text":"Нужна новая лицензия MDaemon на 50 пользователей","conversation_context":[],"requirements":{}}'
 
 curl --fail-with-body --no-buffer http://127.0.0.1:8000/internal/v1/compose \
   -H "Authorization: Bearer ${ML_SERVICE_TOKEN}" -H 'Content-Type: application/json' \
-  --data '{"request_id":"smoke-compose","deadline_ms":90000,"outcome":"answer","language":"ru","facts":[{"id":"demo-seats","text":"В примере один пакет покрывает 50 пользователей."}]}'
+  --data '{"request_id":"smoke-compose","deadline_ms":120000,"outcome":"answer","language":"ru","facts":[{"id":"demo-seats","text":"В примере один пакет покрывает 50 пользователей."}]}'
 ```

@@ -100,7 +100,7 @@ components:
     DeadlineMs:
       type: integer
       minimum: 1
-      description: Остаток дедлайна хода. Сервис ограничивает ожидание 90 000 мс.
+      description: Остаток дедлайна хода. Лимит FastAPI составляет 120 000 мс и включает очередь и холодный запуск.
     PositiveInt: { type: integer, minimum: 1 }
     Budget: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
     LicenseKind: { enum: [new, renewal] }
