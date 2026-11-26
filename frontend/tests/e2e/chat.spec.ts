@@ -51,6 +51,7 @@ test('preserves the editor on HTTP rejection and recovers an interrupted reload'
   await page.getByRole('button', { name: 'Отправить' }).click()
   await expect(input).toHaveValue('Лимит')
   await expect(page.getByRole('alert')).toContainText('Слишком много')
+  await page.evaluate(() => { document.documentElement.dataset.mockSseStepped = 'true' })
   await input.fill('Подобрать решение на 50 пользователей')
   await page.getByRole('button', { name: 'Отправить' }).click()
   await expect(page.getByRole('article', { name: 'Ответ формируется' })).toBeVisible()

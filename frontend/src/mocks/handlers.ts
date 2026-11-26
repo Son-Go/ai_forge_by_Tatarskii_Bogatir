@@ -107,6 +107,9 @@ export const handlers = [
     record.turns[input.client_message_id] = savedTurn
     record.changed = /изменение/i.test(input.text)
     save()
+    const stepByStep = import.meta.env.MODE === 'mock' && document.documentElement.dataset.mockSseStepped === 'true'
+    const nextBlock = 'softline:mock-next-delta'
+    let releaseStep: (() => void) | undefined
     let cancelled = false
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -156,8 +159,18 @@ export const handlers = [
           for (const part of message.text.match(/.{1,18}/gu) || []) {
             text += part; partial.text = text
             save()
+            const pause = stepByStep && seq < 2 ? new Promise<void>((resolve) => {
+              const resume = () => {
+                window.removeEventListener(nextBlock, resume)
+                releaseStep = undefined
+                resolve()
+              }
+              releaseStep = resume
+              window.addEventListener(nextBlock, resume, { once: true })
+            }) : delay(import.meta.env.MODE === 'test' ? 1 : 45)
             emit({ type: 'delta', data: { seq: ++seq, text: part } })
-            await delay(import.meta.env.MODE === 'test' ? 1 : 45)
+            await pause
+            if (stepByStep && cancelled) return
           }
           Object.assign(partial, message)
           record.session.last_turn = { turn_id: turnId, status: 'complete', outcome: complex ? 'insufficient_data' : question ? 'answer' : recommend ? 'recommend' : 'clarify' }
@@ -167,7 +180,7 @@ export const handlers = [
         save()
         if (!cancelled) controller.close()
       },
-      cancel() { cancelled = true },
+      cancel() { cancelled = true; releaseStep?.() },
     })
     return new HttpResponse(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
   }),

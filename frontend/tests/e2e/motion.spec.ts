@@ -6,32 +6,33 @@ test('message motion runs once during SSE and preserves drafting and scroll', as
   await expect(page.getByRole('heading', { name: /Поможем найти/ })).toBeVisible()
   await page.evaluate(() => {
     const root = document.documentElement
+    root.dataset.mockSseStepped = 'true'
     root.dataset.streamEntries = '0'
-    root.dataset.streamUpdates = '0'
     document.addEventListener('animationstart', (event) => {
       if (event.animationName === 'message-enter' && event.target instanceof Element
         && event.target.matches('.message[aria-label="Ответ формируется"]')) {
         root.dataset.streamEntries = String(Number(root.dataset.streamEntries) + 1)
       }
     })
-    new MutationObserver((records) => {
-      for (const record of records) {
-        const element = record.target instanceof Element ? record.target : record.target.parentElement
-        if (element?.closest('.message[aria-label="Ответ формируется"] .message-body')) {
-          root.dataset.streamUpdates = String(Number(root.dataset.streamUpdates) + 1)
-        }
-      }
-    }).observe(document.querySelector('.conversation')!, { childList: true, characterData: true, subtree: true })
   })
   const input = page.getByRole('textbox', { name: 'Ваше сообщение' })
   await input.fill('Подобрать решение на 50 сотрудников')
   await page.getByRole('button', { name: 'Отправить', exact: true }).click()
   await input.fill('Черновик следующего вопроса')
+  const streamBody = page.getByRole('article', { name: 'Ответ формируется' }).locator('.message-body')
+  await expect(streamBody).toBeVisible()
+  await expect(page.locator('html')).toHaveAttribute('data-stream-entries', '1')
+  const firstBlock = await streamBody.innerText()
+  expect(firstBlock.length).toBeGreaterThan(0)
+  await page.evaluate(() => window.dispatchEvent(new Event('softline:mock-next-delta')))
+  await expect.poll(async () => (await streamBody.innerText()).length).toBeGreaterThan(firstBlock.length)
+  await expect(streamBody).toContainText(firstBlock)
+  await expect(page.locator('html')).toHaveAttribute('data-stream-entries', '1')
+  await page.evaluate(() => window.dispatchEvent(new Event('softline:mock-next-delta')))
   await expect(page.getByRole('button', { name: 'Выбрать', exact: true })).toBeEnabled()
   await expect(input).toHaveValue('Черновик следующего вопроса')
   await expect(input).toBeFocused()
   await expect(page.locator('html')).toHaveAttribute('data-stream-entries', '1')
-  expect(await page.locator('html').getAttribute('data-stream-updates').then(Number)).toBeGreaterThanOrEqual(2)
   await expect(page.getByRole('article', { name: 'Вы', exact: true })).toHaveCount(1)
 
   const conversation = page.locator('.conversation')
