@@ -9,6 +9,7 @@ PositiveInt = Annotated[int, Field(gt=0)]
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 UserText = Annotated[str, StringConstraints(min_length=1, max_length=8_000, pattern=r"\S")]
 Budget = Annotated[str, StringConstraints(pattern=r"^[0-9]+(\.[0-9]+)?$")]
+Evidence = Annotated[str, StringConstraints(min_length=1, max_length=240, pattern=r"\S")]
 Intent = Literal["known_product", "needs_solution", "product_question"]
 Outcome = Literal["clarify", "recommend", "answer", "insufficient_data"]
 LicenseKind = Literal["new", "renewal"]
@@ -62,9 +63,13 @@ class ClearUpdate(ModelOutput):
     field: RequirementField
 
 
+class ModelClearUpdate(ClearUpdate):
+    evidence: Evidence | None = None
+
+
 class SetUpdate(ModelOutput):
     op: Literal["set"]
-    evidence: Annotated[str, StringConstraints(min_length=1, max_length=240, pattern=r"\S")]
+    evidence: Evidence
 
 
 class SetText(SetUpdate):
@@ -92,12 +97,12 @@ class SetDomesticRequired(SetUpdate):
     value: bool
 
 
-class Interpretation(ModelOutput):
+SetOperation = SetText | SetInteger | SetLicenseKind | SetBudget | SetDomesticRequired
+
+
+class InterpretationFields(ModelOutput):
     intent: Intent
     product_query: str | None
-    updates: list[
-        ClearUpdate | SetText | SetInteger | SetLicenseKind | SetBudget | SetDomesticRequired
-    ]
     clarification_candidates: list[RequirementField]
 
     @field_validator("clarification_candidates")
@@ -108,7 +113,12 @@ class Interpretation(ModelOutput):
         return fields
 
 
-class InterpretResult(Interpretation):
+class Interpretation(InterpretationFields):
+    updates: list[ModelClearUpdate | SetOperation]
+
+
+class InterpretResult(InterpretationFields):
+    updates: list[ClearUpdate | SetOperation]
     model_version: str
 
 

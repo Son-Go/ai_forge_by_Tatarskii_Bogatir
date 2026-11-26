@@ -20,10 +20,11 @@ from pydantic import TypeAdapter, ValidationError
 
 from . import prompts
 from .config import MAX_DEADLINE_MS, Settings
-from .errors import InvalidModelOutput, ServiceError
+from .errors import InvalidModelOutput, ServiceError, validate_model_json
 from .runpod import RunpodClient
 from .schemas import (
     Block,
+    ClearUpdate,
     Complete,
     ComposeRequest,
     Error,
@@ -32,6 +33,7 @@ from .schemas import (
     InterpretResult,
     ModelRequest,
     RequestId,
+    SetOperation,
 )
 
 MAX_BLOCKS = 4
@@ -106,22 +108,30 @@ async def interpret(
     interpretation = await provider.interpret(
         prompts.INTERPRET, model_payload(body, provider), body.request_id, deadline
     )
+    updates: list[ClearUpdate | SetOperation] = []
     for update in interpretation.updates:
-        if update.op == "set" and update.evidence not in body.text:
-            raise InvalidModelOutput()
+        if update.evidence is not None and update.evidence not in body.text:
+            raise InvalidModelOutput(f"{update.op}_evidence_not_in_current_message")
+        if update.op == "clear":
+            updates.append(ClearUpdate(op="clear", field=update.field))
+        else:
+            updates.append(update)
     response.headers["X-Prompt-Version"] = prompts.INTERPRET_VERSION
-    return InterpretResult(**interpretation.model_dump(), model_version=provider.model_version)
+    return InterpretResult(
+        intent=interpretation.intent,
+        product_query=interpretation.product_query,
+        updates=updates,
+        clarification_candidates=interpretation.clarification_candidates,
+        model_version=provider.model_version,
+    )
 
 
 def parse_block(line: str, fact_ids: set[str], facts_required: bool) -> Block:
     if len(line) > MAX_BLOCK_JSON_CHARS:
-        raise InvalidModelOutput()
-    try:
-        block = Block.model_validate_json(line)
-    except ValidationError:
-        raise InvalidModelOutput() from None
+        raise InvalidModelOutput("compose_block_too_large")
+    block = validate_model_json(Block, line, "compose_block_schema")
     if not fact_ids.issuperset(block.fact_ids) or (facts_required and not block.fact_ids):
-        raise InvalidModelOutput()
+        raise InvalidModelOutput("invalid_compose_fact_references")
     return block
 
 
@@ -131,7 +141,7 @@ async def model_lines(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
         lines = (pending + chunk).split("\n")
         pending = lines.pop()
         if len(pending) > MAX_BLOCK_JSON_CHARS:
-            raise InvalidModelOutput()
+            raise InvalidModelOutput("compose_block_too_large")
         for line in lines:
             yield line
     if pending:
@@ -193,7 +203,7 @@ async def compose(
                 continue
             block_count += 1
             if block_count > MAX_BLOCKS:
-                raise InvalidModelOutput()
+                raise InvalidModelOutput("too_many_compose_blocks")
             block = parse_block(line, fact_ids, facts_required)
             if block_count == 1:
                 logger.info(
@@ -203,7 +213,7 @@ async def compose(
                 )
             yield ServerSentEvent(event="block", data=block)
         if not block_count:
-            raise InvalidModelOutput()
+            raise InvalidModelOutput("missing_compose_blocks")
     except ServiceError as error:
         yield ServerSentEvent(event="failed", data=error_body(error, body.request_id))
         return
@@ -222,7 +232,12 @@ async def compose(
 
 
 def error_body(error: ServiceError, request_id: str) -> Error:
-    logger.warning("ML error request_id=%s code=%s", request_id, error.code)
+    if isinstance(error, InvalidModelOutput):
+        logger.warning(
+            "ML error request_id=%s code=%s reason=%s", request_id, error.code, error.reason
+        )
+    else:
+        logger.warning("ML error request_id=%s code=%s", request_id, error.code)
     return Error(code=error.code, message=error.message, request_id=request_id)
 
 

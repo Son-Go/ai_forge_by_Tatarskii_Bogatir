@@ -148,7 +148,11 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
         assert body["temperature"] == 0
         assert body["chat_template_kwargs"] == {"enable_thinking": False}
         if structured:
-            assert body["response_format"]["type"] == "json_schema"
+            response_format = body["response_format"]
+            assert response_format["type"] == "json_schema"
+            clear_schema = response_format["json_schema"]["schema"]["$defs"]["ModelClearUpdate"]
+            assert "evidence" in clear_schema["properties"]
+            assert "evidence" not in clear_schema["required"]
         else:
             assert "response_format" not in body
         assert json.loads(body["messages"][1]["content"]) == {
@@ -164,23 +168,85 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
     async with client_for(settings, handler) as client:
         response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
     assert response.status_code == 200
-    assert response.headers["X-Prompt-Version"] == "interpret-1"
+    assert response.headers["X-Prompt-Version"] == "interpret-2"
     assert response.json() == RESULT | {"model_version": "release-a"}
 
 
+async def test_interpret_accepts_clear_quote_and_returns_only_op_and_field(settings):
+    clear = {"op": "clear", "field": "edition"}
+    quote = "Редакция не важна"
+    body = INTERPRET | {"text": f"{INTERPRET['text']}. {quote}."}
+    upstream = RESULT | {"updates": [RESULT["updates"][0], clear | {"evidence": quote}]}
+
+    async with client_for(settings, lambda _: completion(upstream)) as client:
+        response = await client.post("/internal/v1/interpret", json=body, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["updates"] == [RESULT["updates"][0], clear]
+
+
 @pytest.mark.parametrize(
-    "update",
+    "update, reason",
     [
-        {"op": "set", "field": "seats", "value": "50", "evidence": "50 пользователей"},
-        {"op": "set", "field": "seats", "value": 50, "evidence": "фрагмент отсутствует"},
-        {"op": "set", "field": "budget_rub", "value": "5,000", "evidence": "50"},
+        (
+            {"op": "set", "field": "seats", "value": "50", "evidence": "50 пользователей"},
+            "interpretation_schema:",
+        ),
+        (
+            {"op": "set", "field": "seats", "value": 50, "evidence": "фрагмент отсутствует"},
+            "set_evidence_not_in_current_message",
+        ),
+        (
+            {"op": "set", "field": "budget_rub", "value": "5,000", "evidence": "50"},
+            "interpretation_schema:",
+        ),
+        (
+            {"op": "clear", "field": "edition", "evidence": "Подбираю почтовый сервер"},
+            "clear_evidence_not_in_current_message",
+        ),
+        (
+            {"op": "clear", "field": "edition", "evidence": "новая ЛИЦЕНЗИЯ"},
+            "clear_evidence_not_in_current_message",
+        ),
+        (
+            {"op": "clear", "field": "edition", "evidence": {"message": "private-model-text"}},
+            "interpretation_schema:",
+        ),
     ],
 )
-async def test_interpret_rejects_invalid_model_update(settings, update):
+async def test_interpret_rejects_invalid_model_update_safely(settings, update, reason, caplog):
     async with client_for(settings, lambda _: completion(RESULT | {"updates": [update]})) as client:
         response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
     assert response.status_code == 503
     assert response.json()["code"] == "MODEL_INVALID_OUTPUT"
+    assert (
+        f"request_id={INTERPRET['request_id']} code=MODEL_INVALID_OUTPUT reason={reason}"
+        in caplog.text
+    )
+    for text in (
+        INTERPRET["text"],
+        "фрагмент отсутствует",
+        "Подбираю почтовый сервер",
+        "новая ЛИЦЕНЗИЯ",
+        "private-model-text",
+    ):
+        assert text not in caplog.text
+
+
+async def test_interpret_logs_invalid_json_as_a_code(settings, caplog):
+    upstream = httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": "private-invalid-json"}, "finish_reason": "stop"}]
+        },
+    )
+    async with client_for(settings, lambda _: upstream) as client:
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+    assert response.status_code == 503
+    assert (
+        "request_id=req-interpret code=MODEL_INVALID_OUTPUT "
+        "reason=interpretation_schema:json_invalid" in caplog.text
+    )
+    assert "private-invalid-json" not in caplog.text
 
 
 async def test_compose_buffers_partial_chunks_and_validates_each_block(settings):

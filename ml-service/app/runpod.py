@@ -8,10 +8,10 @@ from typing import Any
 import httpx
 from anyio import CancelScope
 from httpx_sse import SSEError, aconnect_sse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from .config import Settings
-from .errors import InvalidModelOutput, ServiceError
+from .errors import InvalidModelOutput, ServiceError, validate_model_json
 from .schemas import Interpretation
 
 logger = logging.getLogger("uvicorn.error").getChild("runpod")
@@ -40,7 +40,7 @@ class Chunk(BaseModel):
 
 
 @contextmanager
-def translate_runpod_errors() -> Iterator[None]:
+def translate_runpod_errors(request_id: str) -> Iterator[None]:
     try:
         yield
     except (TimeoutError, httpx.TimeoutException):
@@ -49,10 +49,10 @@ def translate_runpod_errors() -> Iterator[None]:
         status = error.response.status_code
         if status in (408, 504):
             raise ServiceError("MODEL_TIMEOUT", "Истекло время ожидания модели.") from None
-        logger.warning("Runpod HTTP status=%s", status)
+        logger.warning("Runpod HTTP status=%s request_id=%s", status, request_id)
         raise ServiceError("MODEL_UNAVAILABLE", "RunPod не смог обработать запрос.") from None
-    except (SSEError, ValidationError):
-        raise InvalidModelOutput() from None
+    except SSEError:
+        raise InvalidModelOutput("invalid_stream_content_type") from None
     except httpx.HTTPError:
         raise ServiceError("MODEL_UNAVAILABLE", "Соединение с RunPod прервано.") from None
 
@@ -90,7 +90,7 @@ class RunpodClient:
         self, system_prompt: str, user_payload: str, request_id: str, deadline: float
     ) -> Interpretation:
         started = perf_counter()
-        with translate_runpod_errors():
+        with translate_runpod_errors(request_id):
             async with asyncio.timeout_at(deadline), self.slots:
                 response = await self.http.post(
                     "chat/completions",
@@ -98,13 +98,17 @@ class RunpodClient:
                     headers={"X-Request-Id": request_id},
                 )
                 response.raise_for_status()
-                completion = Completion.model_validate_json(response.content)
+                completion = validate_model_json(Completion, response.content, "completion_schema")
                 if len(completion.choices) != 1:
-                    raise InvalidModelOutput()
+                    raise InvalidModelOutput("unexpected_completion_choices")
                 choice = completion.choices[0]
-                if choice.finish_reason not in (None, "stop") or not choice.message.content:
-                    raise InvalidModelOutput()
-                result = Interpretation.model_validate_json(choice.message.content)
+                if choice.finish_reason not in (None, "stop"):
+                    raise InvalidModelOutput("incomplete_completion")
+                if not choice.message.content:
+                    raise InvalidModelOutput("empty_completion")
+                result = validate_model_json(
+                    Interpretation, choice.message.content, "interpretation_schema"
+                )
         logger.info(
             "Runpod interpret request_id=%s provider_id=%r elapsed_ms=%.0f",
             request_id,
@@ -119,7 +123,7 @@ class RunpodClient:
         started = perf_counter()
         resources = AsyncExitStack()
         try:
-            with translate_runpod_errors():
+            with translate_runpod_errors(request_id):
                 async with asyncio.timeout_at(deadline):
                     await resources.enter_async_context(self.slots)
                     source = await resources.enter_async_context(
@@ -138,17 +142,17 @@ class RunpodClient:
                     async with asyncio.timeout_at(deadline):
                         event = await anext(events, None)
                     if event is None:
-                        raise InvalidModelOutput()
+                        raise InvalidModelOutput("stream_ended_before_done")
                     if event.event == "error":
-                        raise InvalidModelOutput()
+                        raise InvalidModelOutput("provider_stream_error")
                     if event.data == "[DONE]":
                         return
                     if not event.data:
                         continue
-                    chunk = Chunk.model_validate_json(event.data)
+                    chunk = validate_model_json(Chunk, event.data, "stream_chunk_schema")
                     for choice in chunk.choices:
                         if choice.finish_reason not in (None, "stop"):
-                            raise InvalidModelOutput()
+                            raise InvalidModelOutput("incomplete_stream")
                         if choice.delta.content:
                             if first_token:
                                 logger.info(
