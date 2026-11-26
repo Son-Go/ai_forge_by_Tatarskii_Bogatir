@@ -100,7 +100,7 @@ export interface paths {
         put?: never;
         /**
          * Сформировать черновик КП по сохранённому выбору
-         * @description Опциональная функция. Доступность возвращает quotes_enabled в GET сессии.
+         * @description Доступность возвращает quotes_enabled. Нужен подтверждённый выбор в сессии. При изменении предложения подтвердите новую карточку через selection. Количество относится к единице выбранной позиции, указанной в предложении.
          */
         post: operations["createQuoteDraft"];
         delete?: never;
@@ -148,6 +148,10 @@ export interface components {
     schemas: {
         /** Format: uuid */
         Uuid: string;
+        QuoteRequest: {
+            customer_name: string;
+            quantity: number;
+        };
         Session: {
             session_id: components["schemas"]["Uuid"];
             messages: (components["schemas"]["Message"] & unknown)[];
@@ -413,7 +417,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuoteRequest"];
+            };
+        };
         responses: {
             /** @description Черновик PDF */
             200: {
@@ -429,6 +437,8 @@ export interface operations {
             403: components["responses"]["Error"];
             404: components["responses"]["Error"];
             409: components["responses"]["Error"];
+            429: components["responses"]["Error"];
+            503: components["responses"]["Error"];
         };
     };
     liveness: {

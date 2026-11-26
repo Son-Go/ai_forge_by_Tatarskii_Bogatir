@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -46,12 +48,15 @@ class ChatStore {
     private final JdbcClient db;
     private final ObjectMapper json;
     private final CatalogSearch catalog;
+    private final boolean quotesEnabled;
     private final SecureRandom random = new SecureRandom();
 
-    ChatStore(JdbcClient db, ObjectMapper json, CatalogSearch catalog) {
+    ChatStore(JdbcClient db, ObjectMapper json, CatalogSearch catalog,
+              @Value("${chat.quotes-enabled:false}") boolean quotesEnabled) {
         this.db = db;
         this.json = json;
         this.catalog = catalog;
+        this.quotesEnabled = quotesEnabled;
     }
 
     Owner create(String cookie) {
@@ -80,7 +85,7 @@ class ChatStore {
                 .param(id).query(this::turn).optional().map(Turn::publicView).orElse(null);
         JsonNode chosen = db.sql("SELECT COALESCE(selected_card, 'null'::jsonb)::text FROM chat_sessions WHERE session_id = ?")
                 .param(id).query(String.class).optional().map(this::tree).orElse(null);
-        return new Session(id, messages(id, Long.MAX_VALUE), chosen, last, false);
+        return new Session(id, messages(id, Long.MAX_VALUE), chosen, last, quotesEnabled);
     }
 
     List<Message> messages(UUID id, long throughOrdinal) {
@@ -249,9 +254,47 @@ class ChatStore {
             ORDER BY ordinal DESC LIMIT 1
             """).params(id, selection.offerId(), selection.catalogVersion().toString()).query(String.class)
                 .optional().map(this::tree).orElseGet(() -> pendingOffer(id, selection));
+        JsonNode current = revalidateOffer(id, previous);
+        db.sql("""
+            UPDATE chat_sessions SET selected_import_id = ?, selected_offer_id = ?, selected_card = CAST(? AS jsonb),
+                pending_offer = NULL, updated_at = now() WHERE session_id = ?
+            """).params(UUID.fromString(current.path("catalog_version").asText()), selection.offerId(),
+                encode(current), id).update();
+        return current;
+    }
+
+    @Transactional(noRollbackFor = ChatError.class)
+    public QuoteDraft prepareQuote(UUID id, String token, QuoteRequest input) {
+        lockOwner(id, token);
+        if (!quotesEnabled) throw new ChatError(404, "QUOTES_DISABLED", "Черновики КП пока недоступны.");
+        if (input == null || input.customerName() == null || input.customerName().isBlank()
+                || input.customerName().length() > 160 || input.customerName().codePoints()
+                        .anyMatch(point -> Character.isISOControl(point) || Character.getType(point) == Character.FORMAT)
+                || input.quantity() == null || input.quantity().compareTo(BigDecimal.ONE) < 0
+                || input.quantity().compareTo(BigDecimal.valueOf(99_999)) > 0 || input.quantity().stripTrailingZeros().scale() > 0) {
+            throw ChatErrors.invalid();
+        }
+        expire(id);
+        requireIdle(id);
+        JsonNode selected = db.sql("SELECT selected_card::text FROM chat_sessions WHERE session_id = ?")
+                .param(id).query(String.class).optional().map(this::tree).orElse(null);
+        if (selected == null || selected.isNull()) {
+            throw new ChatError(409, "QUOTE_SELECTION_REQUIRED", "Сначала подтвердите предложение из каталога.");
+        }
+        JsonNode current = revalidateOffer(id, selected);
+        JsonNode price = current.path("price");
+        if (!price.isObject()) {
+            throw new ChatError(409, "QUOTE_PRICE_UNAVAILABLE", "Для этой позиции менеджер должен подтвердить цену.");
+        }
+        return new QuoteDraft(input.customerName().strip(), current.path("name").asText(),
+                current.path("attributes").path("vendor_code").asText(""), input.quantity().intValueExact(),
+                new BigDecimal(price.path("amount").asText()), price.path("currency").asText());
+    }
+
+    private JsonNode revalidateOffer(UUID id, JsonNode previous) {
         UUID active = catalog.activeVersion().orElseThrow(
                 () -> new ChatError(503, "CATALOG_UNAVAILABLE", "Каталог ещё загружается."));
-        JsonNode current = catalog.card(active, selection.offerId()).orElse(null);
+        JsonNode current = catalog.card(active, previous.path("offer_id").asText()).orElse(null);
         boolean changed = current == null || !List.of("price", "availability", "attributes", "name", "product_url")
                 .stream().allMatch(field -> Objects.equals(previous.get(field), current.get(field)));
         if (changed || !"available".equals(current.path("availability").asText())) {
@@ -261,10 +304,6 @@ class ChatStore {
                     .params(encode(replacement), id).update();
             throw new ChatError(409, "OFFER_CHANGED", "Предложение изменилось. Проверьте параметры в каталоге.", null, replacement);
         }
-        db.sql("""
-            UPDATE chat_sessions SET selected_import_id = ?, selected_offer_id = ?, selected_card = CAST(? AS jsonb),
-                pending_offer = NULL, updated_at = now() WHERE session_id = ?
-            """).params(active, selection.offerId(), encode(current), id).update();
         return current;
     }
 

@@ -131,7 +131,12 @@ paths:
     post:
       operationId: createQuoteDraft
       summary: Сформировать черновик КП по сохранённому выбору
-      description: Опциональная функция. Доступность возвращает quotes_enabled в GET сессии.
+      description: Доступность возвращает quotes_enabled. Нужен подтверждённый выбор в сессии. При изменении предложения подтвердите новую карточку через selection. Количество относится к единице выбранной позиции, указанной в предложении.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QuoteRequest' }
       responses:
         '200':
           description: Черновик PDF
@@ -145,6 +150,8 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /health/live:
     get:
       operationId: liveness
@@ -188,6 +195,12 @@ components:
               status: { enum: [up, down] }
   schemas:
     Uuid: { type: string, format: uuid }
+    QuoteRequest:
+      type: object
+      required: [customer_name, quantity]
+      properties:
+        customer_name: { type: string, minLength: 1, maxLength: 160 }
+        quantity: { type: integer, minimum: 1, maximum: 99999 }
     Session:
       type: object
       required: [session_id, messages, selected_offer, last_turn, quotes_enabled]

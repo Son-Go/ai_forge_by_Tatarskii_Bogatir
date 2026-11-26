@@ -2,6 +2,7 @@ package ru.softline.support.chat;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -9,6 +10,13 @@ import java.util.UUID;
 final class ChatTypes {
     record Send(UUID clientMessageId, String text, UUID retryOfTurnId) {}
     record Choose(String offerId, UUID catalogVersion) {}
+    record QuoteRequest(String customerName, BigDecimal quantity) {}
+    record QuoteDraft(String customerName, String name, String vendorCode, int quantity,
+                      BigDecimal unitPrice, String currency) {
+        BigDecimal total() {
+            return unitPrice.multiply(BigDecimal.valueOf(quantity));
+        }
+    }
     record Owner(UUID id, String token) {}
     record Message(UUID id, String role, String text, String status,
                    List<JsonNode> cards, List<JsonNode> sources, Instant createdAt,

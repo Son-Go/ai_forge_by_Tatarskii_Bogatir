@@ -4,6 +4,7 @@ import static ru.softline.support.chat.ChatTypes.*;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Arrays;
@@ -31,13 +32,15 @@ class ChatController {
     private static final String COOKIE = "softline_session";
     private final ChatStore store;
     private final ChatFlow flow;
+    private final QuoteDraftPdf quotePdf;
     private final Set<String> origins;
     private final RateWindow rate = new RateWindow();
 
-    ChatController(ChatStore store, ChatFlow flow,
+    ChatController(ChatStore store, ChatFlow flow, QuoteDraftPdf quotePdf,
                    @Value("${chat.public-origin:http://localhost:8080}") String publicOrigins) {
         this.store = store;
         this.flow = flow;
+        this.quotePdf = quotePdf;
         this.origins = Set.copyOf(Arrays.stream(publicOrigins.split(",", -1))
                 .map(String::strip).map(ChatController::validatedOrigin).toList());
     }
@@ -99,11 +102,15 @@ class ChatController {
     }
 
     @PostMapping("/{id}/quote-drafts")
-    ResponseEntity<?> quote(@PathVariable UUID id, HttpServletRequest request,
-                            @CookieValue(value = COOKIE, required = false) String token) {
+    ResponseEntity<byte[]> quote(@PathVariable UUID id, @RequestBody(required = false) QuoteRequest input,
+                                 HttpServletRequest request,
+                                 @CookieValue(value = COOKIE, required = false) String token) throws IOException {
         requireOrigin(request);
-        store.read(id, token);
-        throw new ChatError(404, "QUOTES_DISABLED", "Черновики КП пока недоступны.");
+        rate.take("session:" + id, 30);
+        byte[] pdf = quotePdf.render(store.prepareQuote(id, token, input));
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_PDF)
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=quote-draft.pdf")
+                .header(HttpHeaders.CACHE_CONTROL, "no-store").body(pdf);
     }
 
     private void requireOrigin(HttpServletRequest request) {

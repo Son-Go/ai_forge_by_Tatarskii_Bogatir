@@ -26,6 +26,7 @@ chat:
   cold-turn-timeout-ms: ${CHAT_COLD_TURN_TIMEOUT_MS:120000}
   model-idle-ms: ${CHAT_MODEL_IDLE_MS:15000}
   parallel-turns: ${CHAT_PARALLEL_TURNS:8}
+  quotes-enabled: ${CHAT_QUOTES_ENABLED:false}
 
 ml:
   base-url: ${ML_BASE_URL:}
