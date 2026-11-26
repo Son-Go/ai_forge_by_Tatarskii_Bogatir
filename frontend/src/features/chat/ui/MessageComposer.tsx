@@ -46,9 +46,9 @@ export function MessageComposer({ disabled, suggestion, onSend, onEdited }: {
   return <form className="composer" aria-label="Ввод сообщения" onSubmit={submit} onClick={(event) => {
     if (event.target instanceof Element && !event.target.closest('button')) textarea.current?.focus()
   }}>
-    <label className="composer-label" htmlFor="message">Ваше сообщение</label>
+    <label className="sr-only" htmlFor="message">Ваше сообщение</label>
     <div className="composer-input"><div className="composer-text-area">
-    <textarea ref={textarea} id="message" name="message" value={value} rows={1} placeholder="Напишите сообщение…"
+    <textarea ref={textarea} id="message" name="message" value={value} rows={1} placeholder="Напишите сообщение..."
       onChange={(event) => { setText(event.target.value); onEdited() }}
       onKeyDown={(event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() }

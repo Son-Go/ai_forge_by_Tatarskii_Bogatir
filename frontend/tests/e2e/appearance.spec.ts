@@ -22,8 +22,21 @@ test('branded welcome remains accessible and responsive', async ({ page }, testI
   await expect(page.locator('.keyboard-hint')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Отправить', exact: true })).toHaveText('')
   await expect(page.getByRole('link', { name: 'Softline Store — открыть магазин' })).toHaveAttribute('href', 'https://store.softline.ru/')
+  const logo = page.getByRole('img', { name: 'Софтлайн РЕШЕНИЯ · SOFL' })
+  await expect(logo).toBeVisible()
+  expect(await logo.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
+  await expect(logo).toHaveAttribute('src', /softline-solutions-sofl-white\.svg/)
+  const branding = await logo.evaluate((element) => {
+    const image = element.getBoundingClientRect(), area = getComputedStyle(element.parentElement!)
+    return { ratio: image.width / image.height, horizontalClear: parseFloat(area.paddingLeft) / image.height, verticalClear: parseFloat(area.paddingTop), filter: getComputedStyle(element).filter }
+  })
+  expect(branding.ratio).toBeCloseTo(524.41 / 115.4, 2)
+  expect(branding.horizontalClear).toBeGreaterThanOrEqual(.99)
+  expect(branding.verticalClear).toBeGreaterThanOrEqual(18)
+  expect((await page.locator('.header').boundingBox())!.height).toBeLessThanOrEqual(testInfo.project.name === 'mobile' ? 73 : 85)
+  expect(branding.filter).toBe('none')
   for (const name of ['Знаю продукт', 'Подобрать решение', 'Задать вопрос']) await expect(page.getByRole('button', { name, exact: true })).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('welcome.png'), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath('welcome.png'), fullPage: true, animations: 'disabled' })
 
   const ratios = await page.evaluate(() => {
     const css = getComputedStyle(document.documentElement)
@@ -33,7 +46,7 @@ test('branded welcome remains accessible and responsive', async ({ page }, testI
         .map((c) => c <= .04045 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4)
       return values[0]! * .2126 + values[1]! * .7152 + values[2]! * .0722
     }
-    return [['--text', '--surface'], ['--muted', '--surface-muted'], ['--accent', '--surface'], ['--warning', '--warning-soft']]
+    return [['--text', '--surface'], ['--muted', '--surface-muted'], ['--accent', '--surface'], ['--warning', '--warning-soft'], ['--text', '--surface-card'], ['--muted', '--surface-card'], ['--success', '--surface-card'], ['--accent', '--accent-soft'], ['--on-action', '--action'], ['--on-action', '--action-hover'], ['--success', '--success-soft'], ['--muted', '--accent-soft'], ['--case-waiting-text', '--case-waiting-bg'], ['--case-progress-text', '--case-progress-bg']]
       .map(([a, b]) => { const x = luminance(a!), y = luminance(b!); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05) })
   })
   for (const ratio of ratios) expect(ratio).toBeGreaterThanOrEqual(4.5)
@@ -49,7 +62,7 @@ test('branded welcome remains accessible and responsive', async ({ page }, testI
   await page.reload()
   await expect(heading).toBeInViewport()
   await expect(page.locator('html')).toHaveJSProperty('scrollWidth', 320)
-  await page.screenshot({ path: testInfo.outputPath('welcome-compact.png'), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath('welcome-compact.png'), fullPage: true, animations: 'disabled' })
 })
 
 test('loading, error, sources and long card content retain their layout', async ({ page }, testInfo) => {
@@ -60,7 +73,7 @@ test('loading, error, sources and long card content retain their layout', async 
   await input.fill('Ошибка модели')
   await page.getByRole('button', { name: 'Отправить' }).click()
   await expect(page.getByRole('alert')).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('error.png'), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath('error.png'), fullPage: true, animations: 'disabled' })
   await page.getByRole('button', { name: 'Повторить отправку' }).click()
   await expect(page.getByText('Какой срок лицензии вам нужен?')).toBeVisible()
   await input.fill('Подобрать решение на 50 пользователей')
@@ -88,7 +101,7 @@ test('loading, error, sources and long card content retain their layout', async 
   for (const selector of ['.conversation', '.offer-card', '.sources']) {
     expect(await page.locator(selector).first().evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   }
-  await page.screenshot({ path: testInfo.outputPath('long-card.png'), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath('long-card.png'), fullPage: true, animations: 'disabled' })
 })
 
 test('compact composer grows, caps and shrinks with text and viewport changes', async ({ page }) => {
@@ -99,6 +112,8 @@ test('compact composer grows, caps and shrinks with text and viewport changes', 
   const input = page.getByRole('textbox', { name: 'Ваше сообщение' })
   const send = page.getByRole('button', { name: 'Отправить', exact: true })
   const row = page.locator('.composer-input')
+  await expect(page.locator('label[for="message"]')).toHaveClass('sr-only')
+  await expect(input).toHaveAttribute('placeholder', 'Напишите сообщение...')
   async function centered() {
     const [area, field, button] = await Promise.all([row.boundingBox(), input.boundingBox(), send.boundingBox()])
     expect(Math.abs((field!.y + field!.height / 2) - (area!.y + area!.height / 2))).toBeLessThanOrEqual(1)
@@ -106,7 +121,7 @@ test('compact composer grows, caps and shrinks with text and viewport changes', 
   }
   await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThanOrEqual(32)
   await centered()
-  expect((await page.locator('.composer').boundingBox())!.height).toBeLessThan(110)
+  expect((await page.locator('.composer').boundingBox())!.height).toBeLessThan(80)
   const hitArea = await page.locator('.composer-text-area').boundingBox()
   for (const y of [2, hitArea!.height - 2]) {
     await input.evaluate((el) => el.blur())
@@ -117,8 +132,8 @@ test('compact composer grows, caps and shrinks with text and viewport changes', 
   const surface = await page.locator('.composer').boundingBox()
   await page.mouse.click(surface!.x + 4, surface!.y + surface!.height / 2)
   await expect(input).toBeFocused()
-  expect((await send.boundingBox())!.width).toBe(48)
-  expect((await send.boundingBox())!.height).toBe(48)
+  expect((await send.boundingBox())!.width).toBeCloseTo(48, 2)
+  expect((await send.boundingBox())!.height).toBeCloseTo(48, 2)
 
   await input.fill(Array.from({ length: 20 }, (_, i) => `Строка ${i + 1}: описание требований`).join('\n'))
   await expect.poll(async () => (await input.boundingBox())!.height).toBe(160)
@@ -133,11 +148,46 @@ test('compact composer grows, caps and shrinks with text and viewport changes', 
   const before = (await input.boundingBox())!.height
   await page.setViewportSize({ width: 320, height: 568 })
   await expect.poll(async () => (await input.boundingBox())!.height).toBeGreaterThanOrEqual(before)
-  expect((await input.boundingBox())!.height).toBeLessThanOrEqual(160)
+  await expect(input).toHaveCSS('height', '160px')
+  expect((await input.boundingBox())!.height).toBeLessThanOrEqual(160.5)
   await input.fill('Короткий вопрос')
   await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThanOrEqual(32)
   await centered()
-  expect((await send.boundingBox())!.width).toBe(48)
+  expect((await send.boundingBox())!.width).toBeCloseTo(48, 2)
   await expect(page.locator('html')).toHaveJSProperty('scrollWidth', 320)
   expect(errors).toEqual([])
+})
+
+
+test('chat text is comfortable to read and the composer does not cover the final reply', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: /Поможем найти/ })).toBeVisible()
+  await page.getByRole('textbox').fill('Подобрать решение на 50 пользователей')
+  await page.getByRole('button', { name: 'Отправить', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Выбрать', exact: true })).toBeEnabled()
+  const user = page.getByRole('article', { name: 'Вы', exact: true })
+  const assistant = page.getByRole('article', { name: 'Консультант', exact: true }).last()
+  expect((await user.boundingBox())!.x).toBeGreaterThan((await assistant.boundingBox())!.x)
+  for (const message of [user, assistant]) {
+    await expect(message.locator('.message-body')).toHaveCSS('font-size', '16px')
+    const metrics = await message.evaluate((element) => {
+      const body = getComputedStyle(element.querySelector('.message-body')!)
+      const author = getComputedStyle(element.querySelector('.message-author')!)
+      return { size: parseFloat(body.fontSize), line: parseFloat(body.lineHeight), author: parseFloat(author.fontSize), text: body.color, secondary: author.color }
+    })
+    expect(metrics.line / metrics.size).toBeGreaterThanOrEqual(1.6)
+    expect(metrics.line / metrics.size).toBeLessThanOrEqual(1.8)
+    expect(metrics.author).toBeGreaterThanOrEqual(12)
+    expect(metrics.author).toBeLessThan(metrics.size)
+  }
+  await expect(assistant.locator('.ai-tag')).toHaveText('AI')
+  const scroll = page.locator('.conversation')
+  await scroll.evaluate(async (element) => {
+    await Promise.all(element.getAnimations({ subtree: true }).filter((animation) => animation.effect?.getTiming().iterations !== Infinity).map((animation) => animation.finished.catch(() => undefined)))
+    element.scrollTop = element.scrollHeight
+  })
+  const [reply, viewport, composer] = await Promise.all([assistant.boundingBox(), scroll.boundingBox(), page.locator('.composer').boundingBox()])
+  expect(reply!.y + reply!.height).toBeLessThanOrEqual(viewport!.y + viewport!.height + 1)
+  expect(viewport!.y + viewport!.height).toBeLessThanOrEqual(composer!.y + 1)
+  await expect(page.locator('html')).toHaveJSProperty('scrollWidth', await page.locator('html').evaluate((element) => element.clientWidth))
 })

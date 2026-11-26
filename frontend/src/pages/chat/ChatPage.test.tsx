@@ -26,6 +26,6 @@ it('renders model output as text and never creates unsafe source links', () => {
       cards: [], sources: [{ id: 'unsafe', title: 'Источник', kind: 'knowledge', url: 'javascript:alert(1)', checked_at: new Date().toISOString() }] }],
   } }} />)
   expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeVisible()
-  expect(container.querySelector('img')).toBeNull()
+  expect(container.querySelector('.conversation img')).toBeNull()
   expect(container.querySelector('a[href^="javascript:"]')).toBeNull()
 })

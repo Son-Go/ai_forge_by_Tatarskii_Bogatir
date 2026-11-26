@@ -8,6 +8,9 @@ import type { ChatController } from '../../features/chat/model/ChatController'
 import type { ChatState } from '../../features/chat/model/chatReducer'
 import type { Message } from '../../shared/api/types'
 import { Icon } from '../../shared/ui/Icon'
+import { DemoBanner, WorkspaceHeader } from '../../shared/ui/WorkspaceHeader'
+import { ChatHandoff } from '../../features/handoff/ChatHandoff'
+import { QuoteDraftAction } from '../../features/quote/QuoteDraftAction'
 
 const suggestions = [
   { title: 'Знаю продукт', description: 'Найдём нужную версию и уточним условия лицензии.', icon: 'search', text: 'Нужна новая лицензия MDaemon. Помогите выбрать вариант.' },
@@ -16,10 +19,12 @@ const suggestions = [
 ] as const
 const stages = { interpreting: 'Анализируем запрос', searching: 'Ищем в каталоге и базе знаний', generating: 'Готовим ответ' }
 
-export function ChatView({ state, controller, mock = false }: { state: ChatState; controller: ChatController; mock?: boolean }) {
+export function ChatView({ state, controller, mock = false, embedded = false }: { state: ChatState; controller: ChatController; mock?: boolean; embedded?: boolean }) {
   const [suggestion, setSuggestion] = useState('')
   const [following, setFollowing] = useState(true)
+  const [atEnd, setAtEnd] = useState(true)
   const viewport = useRef<HTMLDivElement>(null)
+  const end = useRef<HTMLDivElement>(null)
   const busy = state.phase !== 'ready' || state.issue?.action === 'resend'
   const messages: Message[] = [...state.session?.messages || []]
   if (state.optimistic && !messages.some((m) => m.id === state.optimistic?.id)) messages.push(state.optimistic)
@@ -27,6 +32,18 @@ export function ChatView({ state, controller, mock = false }: { state: ChatState
   useEffect(() => {
     if (following && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight
   }, [signature, following])
+  useEffect(() => {
+    const root = viewport.current
+    const target = end.current
+    if (!root || !target || typeof IntersectionObserver === 'undefined') return
+    // Observe actual content visibility across streaming, resize and section switches.
+    // This controls only the navigation affordance; auto-follow keeps its existing policy.
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry) setAtEnd(root.clientHeight === 0 || entry.isIntersecting)
+    }, { root, threshold: 1 })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [])
   function fill(text: string) { setSuggestion(text); document.getElementById('message')?.focus() }
   const selected = state.session?.selected_offer
   function messageNode(message: Message) {
@@ -50,21 +67,17 @@ export function ChatView({ state, controller, mock = false }: { state: ChatState
   if (state.phase === 'streaming') status = state.stage ? stages[state.stage] : 'Ожидаем ответа модели…'
   if (state.phase === 'recovering' && !state.issue) status = 'Восстанавливаем сохранённый диалог…'
   if (state.phase === 'selecting') status = 'Подтверждаем выбранное предложение…'
-  return <div className="app-shell">
-    <a className="skip-link" href="#consultant-workspace">Перейти к консультации</a>
-    <header className="header"><div className="header-inner">
-      <a className="brand" href="https://store.softline.ru/" target="_blank" rel="noopener noreferrer" aria-label="Softline Store — открыть магазин">
-        <span className="brand-wordmark">софт<span>лайн</span></span><span className="brand-caption">STORE</span>
-      </a>
-      <nav className="header-nav" aria-label="Навигация Softline"><a href="https://store.softline.ru/" target="_blank" rel="noopener noreferrer">Магазин Softline<Icon name="external" /></a><span className="nav-current" aria-current="page"><Icon name="assistant" />AI-консультант</span></nav>
-      </div>
-    </header>
-    {mock && <aside className="mock-banner"><span className="demo-tag">ДЕМО</span>Демонстрационный режим · используются синтетические данные</aside>}
+  return <div className={embedded ? 'chat-section' : 'app-shell'}>
+    {!embedded && <><WorkspaceHeader />{mock && <DemoBanner />}</>}
     <main className={`main${messages.length ? ' has-messages' : ''}`} id="consultant-workspace" tabIndex={-1}>
       <div className="workspace-bar"><div className="workspace-title"><span className="workspace-icon"><Icon name="assistant" /></span><h1>Консультант Softline</h1></div><div className="workspace-actions"><span className="workspace-context"><Icon name="book" />Каталог и база знаний</span><button className="new-dialog" type="button" disabled={!['ready', 'unavailable'].includes(state.phase)} onClick={() => { setSuggestion(''); void controller.newSession() }}><Icon name="plus" />Новый диалог</button></div></div>
       <div className="conversation" ref={viewport} onScroll={() => {
         const el = viewport.current
-        if (el) setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 80)
+        if (el) {
+          const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
+          setFollowing(remaining < 80)
+          setAtEnd(remaining <= 2)
+        }
       }} aria-label="Переписка">
         {!messages.length && state.phase === 'ready' && <section className="welcome">
           <div className="welcome-intro"><div className="welcome-copy"><span className="eyebrow"><span />От задачи — к выбору</span>
@@ -88,9 +101,17 @@ export function ChatView({ state, controller, mock = false }: { state: ChatState
           </div>
         </section>}
         {state.updatedOffer && <section className="updated-offer"><h2>Обновлённое предложение</h2><OfferCard offer={state.updatedOffer} selected={false} disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
+        {state.session && messages.length > 0 && <div className="conversation-actions">
+          {state.session.quotes_enabled && selected && !busy && <QuoteDraftAction key={`${state.session.session_id}:${selected.offer_id}:${selected.catalog_version}:${state.session.last_turn?.turn_id}`} sessionId={state.session.session_id} demo={mock} onRefresh={() => void controller.recover()} />}
+          <ChatHandoff key={state.session.session_id} session={state.session} demo={mock} disabled={!!busy} />
+        </div>}
+        <div className="conversation-end" ref={end} aria-hidden="true" />
       </div>
+      {messages.length > 0 && !atEnd && <div className="conversation-jump"><button type="button" className="latest" aria-label="К последнему сообщению" title="К последнему сообщению" onClick={() => {
+        if (viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight
+        setFollowing(true)
+      }}><Icon name="down" /></button></div>}
       <div className="composer-dock">
-      {!following && <button type="button" className="latest" onClick={() => setFollowing(true)}>К последнему сообщению<Icon name="down" /></button>}
       <MessageComposer disabled={!!busy} suggestion={suggestion} onEdited={() => setSuggestion('')} onSend={async (text) => { setFollowing(true); await controller.send(text); return controller.getSnapshot().rejectedText }} />
       <p className="footnote"><Icon name="shield" />Параметры, стоимость и наличие требуют проверки по источникам.</p>
       </div>
@@ -98,7 +119,7 @@ export function ChatView({ state, controller, mock = false }: { state: ChatState
   </div>
 }
 
-export function ChatPage() {
+export function ChatPage({ embedded = false }: { embedded?: boolean }) {
   const { state, controller } = useChat()
-  return <ChatView state={state} controller={controller} mock={import.meta.env.MODE === 'mock'} />
+  return <ChatView state={state} controller={controller} mock={import.meta.env.MODE === 'mock'} embedded={embedded} />
 }

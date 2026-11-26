@@ -1,3 +1,168 @@
+# Готовность Frontend к публикации исходников
+
+Актуальная проверка: 26 ноября 2026, ветка **feat/frontend**, исходный HEAD
+`8359e42bfe7499d4a20a125875d1dae4c48f0715`. Рабочая ветка уже отслеживает
+`origin/feat/frontend`; по локальным remote refs HEAD совпадает. Сетевой fetch не выполнялся.
+Remote: https://github.com/Son-Go/ai_forge_by_Tatarskii_Bogatir.git.
+
+**Исходники готовы к ручному commit/push для интеграции.** Блокирующих проблем
+по выполненным проверкам нет. Это не заявление о завершённой интеграции настоящего
+Backend/ML или готовности менеджерской очереди к работе с реальными обращениями.
+Git add/commit/push/merge/deploy не выполнялись; индекс пуст.
+
+## Последняя UX-доработка
+
+- Круглая кнопка вниз 40 px desktop / 44 px mobile, без видимого текста, с aria-label
+  и title «К последнему сообщению». Glass, фокус и reduced motion сохранены.
+  Отдельный ряд между историей и composer исключает наложение на сообщения.
+  IntersectionObserver следит за концом при стриминге, resize и смене раздела;
+  исходная политика auto-follow не изменена.
+- Пузырь пользователя справа, ИИ слева; короткий текст занимает свою ширину,
+  длинный ограничен 72ch/доступной шириной. Карточки и источники не сужены:
+  до/после 440/720 px на desktop, 332/332 px на mobile.
+- Доступная метка «Ваше сообщение» сохранена через sr-only; видимый заголовок убран.
+  Placeholder «Напишите сообщение...». Форма 70 px в пустом состоянии,
+  textarea 28–160 px, ряд/текст/отправка центрированы по всему полю; клик по
+  свободной области фокусирует ввод. Обработчики отправки и автогроу сохранены.
+- Предыдущие Dark Premium, оригинальный русский SVG-логотип, шрифтовая иерархия,
+  графитовые карточки и два различимых статуса, анимации и оба раздела сохранены.
+
+## Проверки
+
+| Проверка | Результат |
+| --- | --- |
+| API-типы | pnpm api:check: совпадают с публичным OpenAPI |
+| TypeScript | pnpm typecheck: прошёл |
+| ESLint | pnpm lint: без предупреждений |
+| Vitest | 31 тест в 9 файлах прошёл |
+| Playwright | 36/36 Chrome desktop/mobile |
+| Production | pnpm build прошёл, sourcemap/worker/MSW-обработчиков в артефактах нет |
+| API-mode smoke | Production без MSW с перехваченным контрактным API: сессия, POST/SSE, GET/reload, выбор, PDF прошли |
+| Cookie/Origin smoke | Тестовая HttpOnly-cookie передаётся и не читается JS; POST содержит Origin; это не проверка Secure/Origin-политики реального Backend |
+| Менеджер в production | Не вызывает публичный API/не подставляет demo-очередь; явно показано отсутствие подключения |
+| UX | Короткие/длинные/неразрывные строки, textarea/фокус, круглая кнопка вне текста, переход к концу/resize, активный SSE/черновик/история |
+| Адаптивность/доступность | 1280/390/320 px, нет горизонтального переполнения; контраст проверенных сочетаний ≥4.5:1, reduced motion/transparency |
+| Runtime | Неожиданных pageerror/ResizeObserver-ошибок в проверенных сценариях нет |
+| Git | diff --check прошёл, индекс пуст; Backend/ML/архитектура/контракты/зависимости без изменений |
+
+Production: JS 284.78 kB / gzip 87.36 kB; CSS 41.71 kB / gzip 8.08 kB;
+активный SVG 12.64 kB / gzip 3.13 kB. Файлы шрифтов и новые зависимости не добавлялись.
+
+Итоговые 10 локальных скриншотов находятся в `.cache/visual-preview/pre-publication/`
+(клиент, прокрутка, менеджер, мобильные и 320 px); осмотрены целиком. В Git не входят.
+
+## Что готово, а что демонстрационное
+
+| Категория | Функции и граница |
+| --- | --- |
+| Готово к реальному API | Создание/восстановление сессий, POST/fetch SSE, история, повторы/ошибки, карточки/источники/выбор, OFFER_CHANGED, опциональный PDF при quotes_enabled |
+| Только dev:mock | Синтетические ответы каталога/знаний, демоочередь менеджера и DEMO-передача с локальным снимком; статический маркированный PDF без коммерческой силы |
+| Не подключено | Реальная регистрация/очередь/статусы обращений, менеджерская авторизация, структурированные требования из сервера, счёт/оплата/CRM/загрузка файлов |
+| Нужно Backend | Сессионные/диалоговые маршруты, cookie/Origin/идемпотентность/лимиты и БД, каталог/знания/ML, согласованные контракты менеджера и документов |
+
+Точная инструкция и совместный приёмочный прогон: [backend-integration.md](backend-integration.md).
+Открытые вопросы: [backend-questions.md](backend-questions.md). Реальные Spring Boot/ML
+не запускались; Secure-cookie, HTTPS, proxy/SSE-буферизация и настоящие данные требуют
+совместного прогона. Интерфейс не выдаёт локальную регистрацию за реальную передачу.
+
+## Состав публикации и статический аудит
+
+Всего **42 файлов** в рабочем дереве: **17 изменённых**, **25 новых**.
+Это кандидаты для будущего коммита, не содержимое индекса.
+Проверены все 74 исходных файлов области frontend/ + журнала:
+72 текстовых и 2 официальных PNG. Кандидатов на секреты, маркеров конфликтов,
+лишних пробелов, tracked ignored-файлов и запрещённых артефактов не найдено.
+
+- В составе только Frontend и обязательный docs/agent-work-log.md. API/SSE,
+  reducer/controller/storage сессии, Backend/ML, contracts, infra, AGENTS.md,
+  общая архитектура, package.json и pnpm-lock.yaml не изменены.
+- node_modules, dist, test-results, .cache, .pnpm-store и локальные env исключены
+  из Git. Скриншоты, PDF брендбука, ZIP, каталог заказчика, runtime-файлы и
+  кэш в коммит не входят. Удалённых исходников нет.
+- public/mockServiceWorker.js — необходимый исходный worker разработки, не кэш;
+  production publicDir выключен. Синтетические fixtures менеджерского UI могут
+  быть в JS-бандле, но не являются MSW и не подставляются в production-очередь.
+- В assets оставлены активный официальный русский SVG и три ранее сохранённых
+  официальных варианта как материалы дизайн-системы. В dist попадает только
+  активный SVG. Эти небольшие исходные активы не являются временными файлами.
+- Статический поиск выполнен без вывода возможных значений секретов; найденных
+  кандидатов нет. GitHub-авторизация и состояние сервера GitHub не проверялись
+  попытками отправки; push выполняет пользователь.
+
+Изменённые tracked-файлы:
+
+```text
+docs/agent-work-log.md
+frontend/README.md
+frontend/docs/backend-questions.md
+frontend/docs/design-system.md
+frontend/docs/release-readiness.md
+frontend/src/app/App.tsx
+frontend/src/app/main.tsx
+frontend/src/app/styles/global.css
+frontend/src/app/styles/tokens.css
+frontend/src/entities/offer/OfferCard.tsx
+frontend/src/features/chat/ui/MessageComposer.tsx
+frontend/src/mocks/handlers.ts
+frontend/src/pages/chat/ChatPage.test.tsx
+frontend/src/pages/chat/ChatPage.tsx
+frontend/src/shared/ui/Icon.tsx
+frontend/tests/e2e/appearance.spec.ts
+frontend/tests/e2e/chat.spec.ts
+```
+
+Новые файлы:
+
+```text
+frontend/docs/backend-integration.md
+frontend/docs/brandbook-review.md
+frontend/docs/requirements-audit.md
+frontend/src/app/styles/theme-dark.css
+frontend/src/app/styles/workspace.css
+frontend/src/entities/handoff/types.ts
+frontend/src/features/handoff/ChatHandoff.tsx
+frontend/src/features/handoff/demoStore.test.ts
+frontend/src/features/handoff/demoStore.ts
+frontend/src/features/handoff/fixtures.ts
+frontend/src/features/quote/QuoteDraftAction.tsx
+frontend/src/features/quote/quoteApi.test.ts
+frontend/src/features/quote/quoteApi.ts
+frontend/src/mocks/quoteDraftPdf.ts
+frontend/src/pages/manager/ManagerPage.test.tsx
+frontend/src/pages/manager/ManagerPage.tsx
+frontend/src/shared/assets/softline/softline-sofl-white.svg
+frontend/src/shared/assets/softline/softline-solutions-sofl-white.png
+frontend/src/shared/assets/softline/softline-solutions-sofl-white.svg
+frontend/src/shared/assets/softline/softline-solutions-sofl.png
+frontend/src/shared/lib/useAppRoute.ts
+frontend/src/shared/ui/WorkspaceHeader.tsx
+frontend/tests/e2e/manager.spec.ts
+frontend/tests/e2e/motion.spec.ts
+frontend/tests/e2e/ux.spec.ts
+```
+
+## Ручные команды пользователя
+
+Из корня репозитория (команды здесь приведены для ручного выполнения; агент их не исполнял):
+
+```sh
+git branch --show-current
+git status --short
+git diff --check
+git add -- frontend docs/agent-work-log.md
+git diff --cached --stat
+git diff --cached --check
+git commit -m "feat(frontend): add Dark Premium workspaces and polished chat UX"
+git push origin feat/frontend
+```
+
+Для локального просмотра: из frontend/ `pnpm dev:mock`, http://127.0.0.1:5173.
+Команды PATH для runtime Codex и запуск реального API-режима есть в README.md.
+Публикация исходников не запускает деплой.
+
+<details>
+<summary>Историческая проверка перед коммитом 8359e42 (не актуальный состав файлов)</summary>
+
 # Готовность Frontend к фиксации и публикации
 
 Проверка: 26 ноября 2026 года. Рабочая ветка: `feat/frontend`.
@@ -136,3 +301,6 @@ frontend/vitest.config.ts
 
 Подробности находятся в backend-questions.md. Эти вопросы не блокируют публикацию
 Frontend-исходников и независимую разработку на контрактных моках.
+
+
+</details>

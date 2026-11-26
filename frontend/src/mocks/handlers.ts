@@ -1,4 +1,5 @@
 import { delay, http, HttpResponse } from 'msw'
+import { demoQuotePdf } from './quoteDraftPdf'
 import clarifyExample from '../../../contracts/examples/public-clarify.sse?raw'
 import recommendExample from '../../../contracts/examples/public-recommend.sse?raw'
 import failedExample from '../../../contracts/examples/public-failed.sse?raw'
@@ -53,10 +54,20 @@ function error(code: string, message: string, status: number, extra = {}) {
 function find(id: string | readonly string[] | undefined) { load(); return typeof id === 'string' ? db.get(id) : undefined }
 
 export const handlers = [
+  http.post('/api/v1/sessions/:id/quote-drafts', ({ params }) => {
+    const record = find(params.id)
+    if (!record) return error('SESSION_NOT_FOUND', 'Диалог не найден.', 404)
+    if (!record.session.quotes_enabled) return error('QUOTES_DISABLED', 'Черновики КП отключены.', 403)
+    if (record.session.last_turn?.status === 'running') return error('TURN_IN_PROGRESS', 'Дождитесь завершения ответа.', 409)
+    const selected = record.session.selected_offer
+    if (!selected) return error('NO_SELECTION', 'Сначала выберите предложение.', 400)
+    if (!selected.price || /^0+(\.0+)?$/.test(selected.price.amount)) return error('PRICE_UNCONFIRMED', 'Цену необходимо подтвердить у менеджера.', 409)
+    return new HttpResponse(demoQuotePdf(), { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="DEMO-softline-quote-draft.pdf"' } })
+  }),
   http.post('/api/v1/sessions', () => {
     load()
     const session_id = uuid()
-    db.set(session_id, { session: { session_id, messages: [], selected_offer: null, last_turn: null, quotes_enabled: false }, turns: {} })
+    db.set(session_id, { session: { session_id, messages: [], selected_offer: null, last_turn: null, quotes_enabled: true }, turns: {} })
     save()
     return HttpResponse.json({ session_id }, { status: 201 })
   }),
@@ -118,12 +129,14 @@ export const handlers = [
           emit({ type: 'failed', data: { turn_id: turnId, code: failure.code, message: failure.message, retryable: failure.retryable } })
         } else {
           emit({ type: 'status', data: { stage: 'searching' } })
+          const complex = /проверьте.*справк|переда.*менеджер|вне каталога|заказать.*партн[её]р/i.test(input.text)
           const question = /документ|оплат|вопрос/i.test(input.text)
           const recommend = !question && (record.session.messages.filter((m) => m.role === 'user').length > 1 || /50|подоб|без цены|обрыв|изменение|решение/i.test(input.text))
           const message = structuredClone(question ? { ...clarification,
             text: 'Это демонстрационный ответ по базе знаний. В рабочем режиме здесь будут проверенные сведения и источники от Backend.',
             sources: [{ id: 'demo-knowledge', title: 'Демонстрационный источник', url: 'https://example.com/knowledge', kind: 'knowledge' as const, checked_at: now() }],
           } : recommend ? recommendation : clarification)
+          if (complex) { message.text = 'В этом демонстрационном случае требуется специалист. Ниже можно зарегистрировать локальное демообращение с историей и причиной. Реальному менеджеру оно не отправляется.'; message.cards = []; message.sources = [] }
           message.id = uuid(); message.created_at = now(); message.status = 'complete'
           if (/без цены/i.test(input.text) && message.cards[0]) message.cards[0].price = null
           emit({ type: 'status', data: { stage: 'generating' } })
@@ -147,7 +160,7 @@ export const handlers = [
             await delay(import.meta.env.MODE === 'test' ? 1 : 45)
           }
           Object.assign(partial, message)
-          record.session.last_turn = { turn_id: turnId, status: 'complete', outcome: question ? 'answer' : recommend ? 'recommend' : 'clarify' }
+          record.session.last_turn = { turn_id: turnId, status: 'complete', outcome: complex ? 'insufficient_data' : question ? 'answer' : recommend ? 'recommend' : 'clarify' }
           save()
           emit({ type: 'done', data: { turn_id: turnId, outcome: record.session.last_turn.outcome!, message } })
         }

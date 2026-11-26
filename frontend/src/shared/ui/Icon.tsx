@@ -1,6 +1,11 @@
 import type { SVGProps } from 'react'
 
 const paths = {
+  inbox: <><path d="M4 4h16v16H4V4Z" /><path d="M4 13h5l1 3h4l1-3h5M8 8h8" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  file: <><path d="M14 3H5v18h14V8l-5-5ZM14 3v5h5M8 12h8M8 16h6" /></>,
+  back: <path d="M19 12H5m6-6-6 6 6 6" />,
+  download: <><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" /></>,
   arrow: <><path d="M5 12h14M13 6l6 6-6 6" /></>,
   external: <><path d="M14 4h6v6M20 4l-9 9M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5" /></>,
   plus: <path d="M12 5v14M5 12h14" />,
