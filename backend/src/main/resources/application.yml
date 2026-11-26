@@ -1,6 +1,8 @@
 spring:
   application:
     name: support-agent
+  jackson:
+    property-naming-strategy: SNAKE_CASE
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/support}
     username: ${SPRING_DATASOURCE_USERNAME:support}
@@ -11,5 +13,19 @@ spring:
 catalog:
   feed-url: ${CATALOG_FEED_URL:}
   feed-file: ${CATALOG_FEED_FILE:}
+  knowledge-file: ${CATALOG_KNOWLEDGE_FILE:}
   sync-cron: ${CATALOG_SYNC_CRON:0 0 4 * * *}
   sync-zone: ${CATALOG_SYNC_ZONE:Europe/Moscow}
+
+server:
+  forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:none}
+
+chat:
+  public-origin: ${CHAT_PUBLIC_ORIGIN:http://localhost:8080}
+  turn-timeout-ms: ${CHAT_TURN_TIMEOUT_MS:120000}
+  parallel-turns: ${CHAT_PARALLEL_TURNS:8}
+
+ml:
+  base-url: ${ML_BASE_URL:}
+  data-region: ${ML_DATA_REGION:}
+  service-token: ${ML_SERVICE_TOKEN:}

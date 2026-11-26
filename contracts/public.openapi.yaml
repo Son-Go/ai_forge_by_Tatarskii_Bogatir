@@ -62,7 +62,7 @@ paths:
               required: [client_message_id, text]
               properties:
                 client_message_id: { $ref: '#/components/schemas/Uuid' }
-                text: { type: string, minLength: 1, pattern: '\S' }
+                text: { type: string, minLength: 1, maxLength: 4000, pattern: '\S' }
                 retry_of_turn_id: { $ref: '#/components/schemas/Uuid' }
       responses:
         '200':
@@ -96,6 +96,7 @@ paths:
                 request_id: req-0042
                 turn_id: e3d1701c-1210-4706-94cb-2b9ec088da3d
         '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/sessions/{session_id}/selection:
     parameters:
       - $ref: '#/components/parameters/SessionId'
@@ -123,6 +124,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/sessions/{session_id}/quote-drafts:
     parameters:
       - $ref: '#/components/parameters/SessionId'

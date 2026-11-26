@@ -1,0 +1,139 @@
+package ru.softline.support.chat;
+
+import static ru.softline.support.chat.ChatTypes.*;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import jakarta.servlet.http.HttpServletRequest;
+import java.net.URI;
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseCookie;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.annotation.CookieValue;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+@RestController
+@RequestMapping("/api/v1/sessions")
+class ChatController {
+    private static final String COOKIE = "softline_session";
+    private final ChatStore store;
+    private final ChatFlow flow;
+    private final String origin;
+    private final RateWindow rate = new RateWindow();
+
+    ChatController(ChatStore store, ChatFlow flow, @Value("${chat.public-origin:http://localhost:8080}") String origin) {
+        URI address = URI.create(origin);
+        if (!Set.of("http", "https").contains(address.getScheme()) || address.getHost() == null
+                || address.getUserInfo() != null || !address.getRawPath().isEmpty()
+                || address.getRawQuery() != null || address.getRawFragment() != null) {
+            throw new IllegalArgumentException("chat.public-origin must be an origin without a path");
+        }
+        this.store = store;
+        this.flow = flow;
+        this.origin = origin;
+    }
+
+    @PostMapping
+    ResponseEntity<Map<String, UUID>> create(HttpServletRequest request,
+                                           @CookieValue(value = COOKIE, required = false) String token) {
+        requireOrigin(request);
+        rate.take("create:" + request.getRemoteAddr(), 20);
+        Owner owner = store.create(token);
+        String cookie = ResponseCookie.from(COOKIE, owner.token()).httpOnly(true).secure(true)
+                .sameSite("Lax").path("/api/v1/sessions").build().toString();
+        return ResponseEntity.created(URI.create("/api/v1/sessions/" + owner.id()))
+                .header(HttpHeaders.SET_COOKIE, cookie).body(Map.of("session_id", owner.id()));
+    }
+
+    @GetMapping("/{id}")
+    ResponseEntity<Session> read(@PathVariable UUID id, @CookieValue(value = COOKIE, required = false) String token) {
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store").body(store.read(id, token));
+    }
+
+    @PostMapping(value = "/{id}/messages", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    ResponseEntity<SseEmitter> message(@PathVariable UUID id, @RequestBody Send send, HttpServletRequest request,
+                                       @CookieValue(value = COOKIE, required = false) String token) {
+        requireOrigin(request);
+        if (send.clientMessageId() == null || send.text() == null || send.text().isBlank()
+                || send.text().length() > 4_000) throw invalid();
+        rate.take("message:" + request.getRemoteAddr(), 90);
+        rate.take("session:" + id, 30);
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .body(flow.open(id, token, send));
+    }
+
+    @PostMapping("/{id}/selection")
+    JsonNode select(@PathVariable UUID id, @RequestBody Choose selection, HttpServletRequest request,
+                    @CookieValue(value = COOKIE, required = false) String token) {
+        requireOrigin(request);
+        if (selection.catalogVersion() == null || selection.offerId() == null || selection.offerId().isBlank()
+                || selection.offerId().length() > 256) throw invalid();
+        rate.take("session:" + id, 30);
+        return store.select(id, token, selection);
+    }
+
+    @PostMapping("/{id}/quote-drafts")
+    ResponseEntity<?> quote(@PathVariable UUID id, HttpServletRequest request,
+                            @CookieValue(value = COOKIE, required = false) String token) {
+        requireOrigin(request);
+        store.read(id, token);
+        throw new ChatError(404, "QUOTES_DISABLED", "Черновики КП пока недоступны.");
+    }
+
+    @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
+    ResponseEntity<Map<String, Object>> invalidRequest() { return error(invalid()); }
+
+    @ExceptionHandler(ChatError.class)
+    ResponseEntity<Map<String, Object>> error(ChatError error) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("code", error.code);
+        body.put("message", error.getMessage());
+        body.put("request_id", UUID.randomUUID().toString());
+        if (error.turnId != null) body.put("turn_id", error.turnId);
+        if (error.updatedOffer != null) body.put("updated_offer", error.updatedOffer);
+        return ResponseEntity.status(error.status).contentType(MediaType.APPLICATION_JSON).body(body);
+    }
+
+    private void requireOrigin(HttpServletRequest request) {
+        if (!origin.equals(request.getHeader(HttpHeaders.ORIGIN))) {
+            throw new ChatError(403, "INVALID_ORIGIN", "Источник запроса не разрешён.");
+        }
+    }
+
+    private static ChatError invalid() {
+        return new ChatError(400, "INVALID_REQUEST", "Проверьте поля запроса и длину сообщения.");
+    }
+
+    private static final class RateWindow {
+        private final Map<String, Integer> counts = new HashMap<>();
+        private long start = System.nanoTime();
+
+        synchronized void take(String key, int limit) {
+            long now = System.nanoTime();
+            if (now - start >= Duration.ofMinutes(1).toNanos()) {
+                start = now;
+                counts.clear();
+            }
+            if ((counts.size() >= 100_000 && !counts.containsKey(key))
+                    || counts.getOrDefault(key, 0) >= limit) {
+                throw new ChatError(429, "RATE_LIMIT", "Превышено число запросов. Повторите через минуту.");
+            }
+            counts.merge(key, 1, Integer::sum);
+        }
+    }
+}

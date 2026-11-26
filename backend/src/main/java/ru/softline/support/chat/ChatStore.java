@@ -1,0 +1,313 @@
+package ru.softline.support.chat;
+
+import static ru.softline.support.chat.ChatTypes.*;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import ru.softline.support.catalog.CatalogSearch;
+
+@Service
+class ChatStore {
+    private static final String TURNS = """
+        SELECT t.*, u.body AS user_text
+        FROM chat_turns t JOIN chat_messages u ON u.message_id = t.user_message_id
+        """;
+    private static final String EXPIRE = """
+        WITH expired AS (
+            UPDATE chat_turns SET status = 'failed', error_code = 'TURN_TIMEOUT'
+            WHERE status = 'running' AND deadline_at <= clock_timestamp() %s
+            RETURNING turn_id
+        )
+        UPDATE chat_messages SET status = 'partial'
+        WHERE status = 'streaming' AND turn_id IN (SELECT turn_id FROM expired)
+        """;
+    private final JdbcClient db;
+    private final ObjectMapper json;
+    private final CatalogSearch catalog;
+    private final SecureRandom random = new SecureRandom();
+
+    ChatStore(JdbcClient db, ObjectMapper json, CatalogSearch catalog) {
+        this.db = db;
+        this.json = json;
+        this.catalog = catalog;
+    }
+
+    Owner create(String cookie) {
+        String token = cookie;
+        if (token == null || !token.matches("[A-Za-z0-9_-]{43}")) {
+            byte[] bytes = new byte[32];
+            random.nextBytes(bytes);
+            token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        }
+        UUID id = UUID.randomUUID();
+        db.sql("INSERT INTO chat_sessions (session_id, token_hash) VALUES (?, ?)")
+                .params(id, tokenHash(token)).update();
+        return new Owner(id, token);
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void expireOldTurns() {
+        db.sql(EXPIRE.formatted("")).update();
+    }
+
+    @Transactional
+    public Session read(UUID id, String token) {
+        lockOwner(id, token);
+        expire(id);
+        List<Message> messages = db.sql("SELECT * FROM chat_messages WHERE session_id = ? ORDER BY ordinal")
+                .param(id).query(this::message).list();
+        PublicTurn last = db.sql(TURNS + " WHERE t.session_id = ? ORDER BY t.deadline_at DESC LIMIT 1")
+                .param(id).query(this::turn).optional().map(Turn::publicView).orElse(null);
+        JsonNode chosen = db.sql("SELECT COALESCE(selected_card, 'null'::jsonb)::text FROM chat_sessions WHERE session_id = ?")
+                .param(id).query(String.class).optional().map(this::tree).orElse(null);
+        return new Session(id, messages, chosen, last, false);
+    }
+
+    @Transactional
+    public Accepted reserve(UUID id, String token, Send input, long timeoutMillis) {
+        lockOwner(id, token);
+        expire(id);
+        Turn existing = db.sql(TURNS + " WHERE t.session_id = ? AND t.client_message_id = ?")
+                .params(id, input.clientMessageId()).query(this::turn).optional().orElse(null);
+        if (existing != null) {
+            if (!existing.userText().equals(input.text()) || !Objects.equals(existing.retryOfTurnId(), input.retryOfTurnId())) {
+                throw new ChatError(409, "IDEMPOTENCY_CONFLICT", "Идентификатор уже используется другим запросом.", existing.turnId(), null);
+            }
+            if ("running".equals(existing.status())) throw inProgress(existing.turnId());
+            return new Accepted(existing, true);
+        }
+        requireIdle(id);
+        UUID version = catalog.activeVersion().orElseThrow(
+                () -> new ChatError(503, "CATALOG_UNAVAILABLE", "Каталог ещё загружается."));
+        UUID userMessageId = UUID.randomUUID();
+        if (input.retryOfTurnId() == null) {
+            db.sql("""
+                INSERT INTO chat_messages (message_id, session_id, role, body, status)
+                VALUES (?, ?, 'user', ?, 'complete')
+                """).params(userMessageId, id, input.text()).update();
+        } else {
+            Turn previous = db.sql(TURNS + " WHERE t.session_id = ? AND t.turn_id = ?")
+                    .params(id, input.retryOfTurnId()).query(this::turn).optional().orElse(null);
+            if (previous == null || !"failed".equals(previous.status()) || !previous.retryable()
+                    || !previous.userText().equals(input.text())) {
+                throw new ChatError(400, "INVALID_RETRY", "Повторите исходную реплику завершившегося ошибкой хода.");
+            }
+            userMessageId = previous.userMessageId();
+        }
+        UUID turnId = UUID.randomUUID();
+        String requestId = UUID.randomUUID().toString();
+        OffsetDateTime deadline = OffsetDateTime.now(ZoneOffset.UTC).plusNanos(timeoutMillis * 1_000_000);
+        db.sql("""
+            INSERT INTO chat_turns (turn_id, session_id, client_message_id, request_id, user_message_id,
+                catalog_import_id, status, deadline_at, retry_of_turn_id)
+            VALUES (:turn, :session, :client, :request, :message, :version, 'running', :deadline, :retry)
+            """).param("turn", turnId).param("session", id).param("client", input.clientMessageId())
+                .param("request", requestId).param("message", userMessageId).param("version", version)
+                .param("deadline", deadline).param("retry", input.retryOfTurnId()).update();
+        return new Accepted(new Turn(turnId, id, input.clientMessageId(), requestId, userMessageId, version,
+                "running", null, deadline.toInstant(), input.retryOfTurnId(), null, true, input.text()), false);
+    }
+
+    Map<String, Object> requirements(Turn turn) {
+        return decode(db.sql("SELECT requirements::text FROM chat_sessions WHERE session_id = ?")
+                .param(turn.sessionId()).query(String.class).single(), new TypeReference<>() {});
+    }
+
+    List<Map<String, String>> context(Turn turn) {
+        return db.sql("""
+            SELECT role, body FROM (
+                SELECT role, body, ordinal FROM chat_messages
+                WHERE session_id = ? AND status = 'complete' AND message_id <> ?
+                ORDER BY ordinal DESC LIMIT 8
+            ) messages ORDER BY ordinal
+            """).params(turn.sessionId(), turn.userMessageId())
+                .query((rs, n) -> Map.of("role", rs.getString("role"), "text", clip(rs.getString("body"), 1200))).list();
+    }
+
+    @Transactional
+    public int append(Turn turn, String text) {
+        lockRunning(turn);
+        return db.sql("""
+            INSERT INTO chat_messages (message_id, session_id, turn_id, role, body, status, last_seq)
+            VALUES (?, ?, ?, 'assistant', ?, 'streaming', 1)
+            ON CONFLICT (turn_id) DO UPDATE SET
+                body = chat_messages.body || excluded.body, last_seq = chat_messages.last_seq + 1
+            RETURNING last_seq
+            """).params(UUID.randomUUID(), turn.sessionId(), turn.turnId(), text).query(Integer.class).single();
+    }
+
+    @Transactional
+    public Done complete(Turn turn, Reply reply, Map<String, Object> requirements, boolean changed,
+                         String modelVersion, String promptVersion) {
+        lockRunning(turn);
+        Message answer = db.sql("""
+            UPDATE chat_messages SET status = 'complete', cards = CAST(? AS jsonb), sources = CAST(? AS jsonb)
+            WHERE turn_id = ? RETURNING *
+            """).params(encode(reply.cards()), encode(reply.sources()), turn.turnId()).query(this::message).single();
+        db.sql("""
+            UPDATE chat_turns SET status = 'complete', outcome = :outcome, model_version = :model, prompt_version = :prompt
+            WHERE turn_id = :id
+            """).param("outcome", reply.outcome()).param("model", modelVersion).param("prompt", promptVersion)
+                .param("id", turn.turnId()).update();
+        db.sql("""
+            UPDATE chat_sessions SET requirements = CAST(? AS jsonb), updated_at = now(),
+                selected_import_id = CASE WHEN ? THEN NULL ELSE selected_import_id END,
+                selected_offer_id = CASE WHEN ? THEN NULL ELSE selected_offer_id END,
+                selected_card = CASE WHEN ? THEN NULL ELSE selected_card END
+            WHERE session_id = ?
+            """).params(encode(requirements), changed, changed, changed, turn.sessionId()).update();
+        return new Done(turn.turnId(), reply.outcome(), answer);
+    }
+
+    @Transactional
+    public void fail(Turn turn, String code, boolean retryable) {
+        int count = db.sql("""
+            UPDATE chat_turns SET status = 'failed', error_code = ?, retryable = ?
+            WHERE turn_id = ? AND status = 'running'
+            """).params(code, retryable, turn.turnId()).update();
+        if (count == 1) {
+            db.sql("UPDATE chat_messages SET status = 'partial' WHERE turn_id = ? AND status = 'streaming'")
+                    .param(turn.turnId()).update();
+        }
+    }
+
+    Done savedAnswer(Turn turn) {
+        Message message = db.sql("SELECT * FROM chat_messages WHERE turn_id = ?")
+                .param(turn.turnId()).query(this::message).single();
+        return new Done(turn.turnId(), turn.outcome(), message);
+    }
+
+    @Transactional
+    public JsonNode select(UUID id, String token, Choose selection) {
+        lockOwner(id, token);
+        expire(id);
+        requireIdle(id);
+        JsonNode previous = db.sql("""
+            SELECT item::text FROM chat_messages m
+            CROSS JOIN LATERAL jsonb_array_elements(m.cards) AS item
+            WHERE m.session_id = ? AND m.status = 'complete'
+                AND item->>'offer_id' = ? AND item->>'catalog_version' = ?
+            ORDER BY ordinal DESC LIMIT 1
+            """).params(id, selection.offerId(), selection.catalogVersion().toString()).query(String.class)
+                .optional().map(this::tree).orElseThrow(
+                        () -> new ChatError(404, "OFFER_NOT_SHOWN", "Такое предложение не показано в этой сессии."));
+        UUID active = catalog.activeVersion().orElseThrow(
+                () -> new ChatError(503, "CATALOG_UNAVAILABLE", "Каталог ещё загружается."));
+        JsonNode current = catalog.card(active, selection.offerId()).orElse(null);
+        boolean changed = current == null || !List.of("price", "availability", "attributes", "name", "product_url")
+                .stream().allMatch(field -> Objects.equals(previous.get(field), current.get(field)));
+        if (changed || !"available".equals(current.path("availability").asText())) {
+            throw new ChatError(409, "OFFER_CHANGED", "Предложение изменилось. Проверьте параметры в каталоге.", null, current);
+        }
+        db.sql("""
+            UPDATE chat_sessions SET selected_import_id = ?, selected_offer_id = ?, selected_card = CAST(? AS jsonb),
+                updated_at = now() WHERE session_id = ?
+            """).params(active, selection.offerId(), encode(current), id).update();
+        return current;
+    }
+
+    private void lockOwner(UUID id, String token) {
+        if (token == null || !token.matches("[A-Za-z0-9_-]{43}") || db.sql(
+                "SELECT session_id FROM chat_sessions WHERE session_id = ? AND token_hash = ? FOR UPDATE")
+                .params(id, tokenHash(token)).query(UUID.class).optional().isEmpty()) {
+            throw new ChatError(404, "SESSION_NOT_FOUND", "Сессия не найдена.");
+        }
+    }
+
+    private void requireIdle(UUID id) {
+        db.sql("SELECT turn_id FROM chat_turns WHERE session_id = ? AND status = 'running'")
+                .param(id).query(UUID.class).optional().ifPresent(turn -> { throw inProgress(turn); });
+    }
+
+    private static ChatError inProgress(UUID id) {
+        return new ChatError(409, "TURN_IN_PROGRESS", "Текущий ход ещё выполняется.", id, null);
+    }
+
+    private void expire(UUID id) {
+        db.sql(EXPIRE.formatted("AND session_id = ?")).param(id).update();
+    }
+
+    private void lockRunning(Turn turn) {
+        db.sql("SELECT session_id FROM chat_sessions WHERE session_id = ? FOR UPDATE")
+                .param(turn.sessionId()).query(UUID.class).single();
+        if (db.sql("""
+            SELECT turn_id FROM chat_turns WHERE turn_id = ? AND status = 'running'
+                AND deadline_at > clock_timestamp() FOR UPDATE
+            """).param(turn.turnId()).query(UUID.class).optional().isEmpty()) {
+            throw new ChatError(409, "TURN_TIMEOUT", "Время хода истекло.");
+        }
+    }
+
+    private static String tokenHash(String text) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    private Turn turn(ResultSet rs, int row) throws SQLException {
+        return new Turn(rs.getObject("turn_id", UUID.class), rs.getObject("session_id", UUID.class),
+                rs.getObject("client_message_id", UUID.class), rs.getString("request_id"),
+                rs.getObject("user_message_id", UUID.class), rs.getObject("catalog_import_id", UUID.class),
+                rs.getString("status"), rs.getString("outcome"), instant(rs, "deadline_at"),
+                rs.getObject("retry_of_turn_id", UUID.class), rs.getString("error_code"),
+                rs.getBoolean("retryable"), rs.getString("user_text"));
+    }
+
+    private Message message(ResultSet rs, int row) throws SQLException {
+        return new Message(rs.getObject("message_id", UUID.class), rs.getString("role"), rs.getString("body"),
+                rs.getString("status"), decode(rs.getString("cards"), new TypeReference<>() {}),
+                decode(rs.getString("sources"), new TypeReference<>() {}), instant(rs, "created_at"));
+    }
+
+    private static Instant instant(ResultSet rs, String field) throws SQLException {
+        return rs.getObject(field, OffsetDateTime.class).toInstant();
+    }
+
+    private JsonNode tree(String value) {
+        return decode(value, new TypeReference<>() {});
+    }
+
+    private <T> T decode(String value, TypeReference<T> type) {
+        try {
+            return json.readValue(value, type);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Invalid chat JSON in storage", ex);
+        }
+    }
+
+    private String encode(Object value) {
+        try {
+            return json.writeValueAsString(value);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Cannot serialize chat state", ex);
+        }
+    }
+
+    private static String clip(String text, int max) {
+        return text.length() <= max ? text : text.substring(0, text.offsetByCodePoints(0, Math.min(max, text.codePointCount(0, text.length()))));
+    }
+}

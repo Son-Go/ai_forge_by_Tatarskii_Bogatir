@@ -1,0 +1,218 @@
+package ru.softline.support.chat;
+
+import static ru.softline.support.chat.ChatTypes.*;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import jakarta.annotation.PreDestroy;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.StreamSupport;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+@Service
+class ChatFlow {
+    private static final Logger log = LoggerFactory.getLogger(ChatFlow.class);
+    private final ChatStore store;
+    private final MlClient ml;
+    private final ReplyPlanner planner;
+    private final Semaphore capacity;
+    private final long timeoutMillis;
+    private final java.util.concurrent.ScheduledExecutorService timers = Executors.newScheduledThreadPool(2);
+
+    ChatFlow(ChatStore store, MlClient ml, ReplyPlanner planner,
+             @Value("${chat.parallel-turns:8}") int parallel,
+             @Value("${chat.turn-timeout-ms}") long timeoutMillis) {
+        if (parallel < 1 || timeoutMillis < 100 || timeoutMillis > 300_000) {
+            throw new IllegalArgumentException("Invalid turn limits");
+        }
+        this.store = store;
+        this.ml = ml;
+        this.planner = planner;
+        this.capacity = new Semaphore(parallel);
+        this.timeoutMillis = timeoutMillis;
+    }
+
+    SseEmitter open(UUID id, String token, Send input) {
+        if (!capacity.tryAcquire()) throw new ChatError(429, "TURN_LIMIT", "Сервис занят. Повторите запрос чуть позже.");
+        Accepted accepted;
+        try {
+            accepted = store.reserve(id, token, input, timeoutMillis);
+        } catch (RuntimeException ex) {
+            capacity.release();
+            throw ex;
+        }
+        Turn turn = accepted.turn();
+        SseEmitter emitter = new SseEmitter(timeoutMillis + 8_000);
+        AtomicBoolean finished = new AtomicBoolean();
+        AtomicBoolean disconnected = new AtomicBoolean();
+        Thread worker = Thread.ofVirtual().unstarted(() -> {
+            try {
+                process(accepted, emitter);
+            } catch (IOException | UncheckedIOException ex) {
+                disconnected.set(true);
+            } catch (InterruptedException ex) {
+                Thread.interrupted();
+                String code = disconnected.get() ? "CLIENT_DISCONNECTED" : "TURN_TIMEOUT";
+                if (!accepted.replay()) recordFailure(turn, code);
+                if (!disconnected.get()) sendFailure(emitter, turn, code, true);
+            } catch (RuntimeException ex) {
+                boolean interrupted = Thread.interrupted();
+                String code = disconnected.get() ? "CLIENT_DISCONNECTED"
+                        : interrupted || !Instant.now().isBefore(turn.deadline()) ? "TURN_TIMEOUT"
+                        : ex instanceof ChatError error ? error.code : "TURN_FAILED";
+                log.warn("Chat turn failure request_id={} turn_id={} code={}", turn.requestId(), turn.turnId(), code);
+                if (!accepted.replay()) recordFailure(turn, code);
+                if (!disconnected.get()) sendFailure(emitter, turn, code, true);
+            } finally {
+                try {
+                    if (disconnected.get() && !accepted.replay()) recordFailure(turn, "CLIENT_DISCONNECTED");
+                } finally {
+                    finished.set(true);
+                    capacity.release();
+                    emitter.complete();
+                }
+            }
+        });
+        Runnable cancel = () -> {
+            if (!finished.get()) {
+                disconnected.set(true);
+                worker.interrupt();
+            }
+        };
+        var heartbeat = timers.scheduleAtFixedRate(() -> {
+            if (!finished.get()) {
+                try { emitter.send(SseEmitter.event().comment("waiting")); }
+                catch (IOException | IllegalStateException ex) { cancel.run(); }
+            }
+        }, 8, 8, TimeUnit.SECONDS);
+        long remaining = accepted.replay() ? 5_000 : Math.max(1, Duration.between(Instant.now(), turn.deadline()).toMillis());
+        var timeout = timers.schedule(worker::interrupt, remaining, TimeUnit.MILLISECONDS);
+        emitter.onCompletion(() -> {
+            heartbeat.cancel(false);
+            timeout.cancel(false);
+            cancel.run();
+        });
+        emitter.onError(error -> cancel.run());
+        emitter.onTimeout(cancel);
+        worker.start();
+        return emitter;
+    }
+
+    private void process(Accepted accepted, SseEmitter emitter) throws IOException, InterruptedException {
+        Turn turn = accepted.turn();
+        send(emitter, "accepted", Map.of("turn_id", turn.turnId(), "client_message_id", turn.clientMessageId(),
+                "user_message_id", turn.userMessageId(), "request_id", turn.requestId()));
+        if (accepted.replay()) {
+            if ("complete".equals(turn.status())) send(emitter, "done", store.savedAnswer(turn));
+            else sendFailure(emitter, turn, turn.code(), turn.retryable());
+            return;
+        }
+        send(emitter, "status", Map.of("stage", "interpreting"));
+        Map<String, Object> old = store.requirements(turn);
+        MlClient.Interpretation interpretation;
+        try {
+            interpretation = ml.interpret(turn, old, store.context(turn));
+        } catch (IOException ex) {
+            requireActive(turn);
+            String code = ex instanceof java.net.http.HttpTimeoutException ? "TURN_TIMEOUT" : "ML_UNAVAILABLE";
+            recordFailure(turn, code);
+            sendFailure(emitter, turn, code, true);
+            return;
+        }
+        Map<String, Object> next = planner.apply(old, interpretation, turn.userText());
+        send(emitter, "status", Map.of("stage", "searching"));
+        Reply reply = planner.plan(turn, interpretation, next);
+        Set<String> sent = new HashSet<>();
+        String promptVersion = null;
+        if ("answer".equals(reply.outcome()) || "recommend".equals(reply.outcome())) {
+            send(emitter, "status", Map.of("stage", "generating"));
+            try {
+                promptVersion = ml.compose(turn, reply, block -> emitFactBlock(turn, emitter, reply.facts(), block, sent));
+            } catch (IOException ex) {
+                requireActive(turn);
+                log.info("Using verified facts request_id={} turn_id={}", turn.requestId(), turn.turnId());
+            }
+        }
+        requireActive(turn);
+        for (Fact fact : reply.facts()) {
+            if (sent.add(fact.id())) append(turn, emitter, fact.text(), sent.size() > 1);
+        }
+        Map<String, Object> saved = "product_question".equals(interpretation.intent()) ? old : next;
+        Done answer = store.complete(turn, reply, saved, !old.equals(saved), validVersion(interpretation.modelVersion()),
+                validVersion(promptVersion));
+        send(emitter, "done", answer);
+    }
+
+    private void emitFactBlock(Turn turn, SseEmitter emitter, List<Fact> facts, JsonNode block, Set<String> sent) {
+        JsonNode ids = block.path("fact_ids");
+        if (!ids.isArray() || ids.isEmpty()) return;
+        var listed = StreamSupport.stream(ids.spliterator(), false)
+                .filter(JsonNode::isTextual).map(JsonNode::asText).toList();
+        if (listed.size() != ids.size() || listed.stream().distinct().count() != listed.size()) return;
+        var matched = listed.stream().map(id -> facts.stream().filter(f -> f.id().equals(id)).findFirst()).toList();
+        if (matched.stream().anyMatch(java.util.Optional::isEmpty)) return;
+        // Only verified source text goes to the browser. ML can order fact blocks without adding new claims.
+        for (var item : matched) {
+            Fact fact = item.orElseThrow();
+            if (sent.add(fact.id())) {
+                try { append(turn, emitter, fact.text(), sent.size() > 1); }
+                catch (IOException ex) { throw new UncheckedIOException(ex); }
+            }
+        }
+    }
+
+    private void append(Turn turn, SseEmitter emitter, String text, boolean subsequent) throws IOException {
+        String content = subsequent ? "\n\n" + text : text;
+        int seq = store.append(turn, content);
+        send(emitter, "delta", Map.of("seq", seq, "text", content));
+    }
+
+    private static String validVersion(String name) {
+        return name != null && name.matches("[A-Za-z0-9_.:/-]{1,120}") ? name : null;
+    }
+
+    private static void requireActive(Turn turn) throws InterruptedException {
+        if (Thread.interrupted() || !Instant.now().isBefore(turn.deadline())) throw new InterruptedException();
+    }
+
+    private void recordFailure(Turn turn, String code) {
+        Thread.interrupted();
+        try {
+            store.fail(turn, code, true);
+        } catch (RuntimeException ex) {
+            log.warn("Failed to persist terminal state request_id={} turn_id={} code={}",
+                    turn.requestId(), turn.turnId(), code);
+        }
+    }
+
+    private static void sendFailure(SseEmitter emitter, Turn turn, String code, boolean retryable) {
+        try {
+            send(emitter, "failed", Map.of("turn_id", turn.turnId(), "code", code,
+                    "message", "Не удалось завершить ответ. Можно повторить запрос.", "retryable", retryable));
+        } catch (IOException | IllegalStateException ex) {
+            log.debug("SSE disconnected request_id={}", turn.requestId());
+        }
+    }
+
+    private static void send(SseEmitter emitter, String event, Object value) throws IOException {
+        emitter.send(SseEmitter.event().name(event).data(value, org.springframework.http.MediaType.APPLICATION_JSON));
+    }
+
+    @PreDestroy
+    void stopTimers() { timers.shutdownNow(); }
+}
