@@ -1,0 +1,6 @@
+*
+!pyproject.toml
+!uv.lock
+!panel/
+!panel/**
+**/__pycache__/

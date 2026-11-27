@@ -4,12 +4,26 @@ import { handoffApi, managerQueuePageSize, type AssignedHandoff, type ManagerRep
 import { ApiError } from '../../shared/api/client'
 import { CaseDetail, ManagerWorkspace } from './ManagerWorkspace'
 import { Icon } from '../../shared/ui/Icon'
+import { FaqReviewConnected } from '../../features/faq/FaqReviewConnected'
 
-function presentation(item: QueueItem, messages: AssignedHandoff['messages'] = []): HandoffCase {
+const explanations: Record<QueueItem['reason'], string> = {
+  document_review: 'Обращение передано для проверки документов.',
+  off_catalog_order: 'Обращение передано для заказа вне каталога.',
+  instruction_failed: 'Клиент уже попробовал инструкцию. Она сохранена в истории.',
+  payment_deferral: 'Клиент просит согласовать отсрочку оплаты.',
+}
+
+function presentation(item: QueueItem, messages: AssignedHandoff['messages'] = [], sales?: AssignedHandoff['sales_context']): HandoffCase {
   return { id: item.handoff_id, sessionId: item.session_id, title: handoffReasons[item.reason], reason: item.reason,
-    status: item.status, createdAt: item.created_at, explanation: item.reason === 'document_review' ? 'Обращение передано для проверки документов.' : 'Обращение передано для заказа вне каталога.',
-    requirements: [], messages,
-    offers: [...new Map(messages.flatMap((message) => message.cards).map((offer) => [`${offer.offer_id}:${offer.catalog_version}`, offer])).values()],
+    status: item.status, createdAt: item.created_at, explanation: explanations[item.reason],
+    requirements: sales?.quote ? [
+      { label: 'Версия КП', value: sales.quote.quote_id, evidence: sales.quote.approved ? 'КП одобрено' : 'Ожидает одобрения' },
+      { label: 'Количество', value: String(sales.quote.quantity), evidence: 'Из сохранённого КП' },
+      ...(sales.quote.price ? [{ label: 'Базовая цена', value: `${sales.quote.price.amount} ${sales.quote.price.currency}`, evidence: 'За позицию в КП' }] : []),
+      ...(sales.quote.agreed_total && sales.quote.price ? [{ label: 'Согласованная сумма', value: `${sales.quote.agreed_total} ${sales.quote.price.currency}`, evidence: 'Из сохранённого КП' }] : []),
+      ...(sales.quote.discount_percent ? [{ label: 'Скидка', value: `${sales.quote.discount_percent}%`, evidence: 'Из сохранённого КП' }] : []),
+    ] : [], messages,
+    offers: [...new Map([...(sales?.offer ? [sales.offer] : []), ...messages.flatMap((message) => message.cards)].map((offer) => [`${offer.offer_id}:${offer.catalog_version}`, offer])).values()],
     sources: [...new Map(messages.flatMap((message) => message.sources).map((source) => [source.id, source])).values()],
   }
 }
@@ -35,6 +49,11 @@ export function ManagerConnected({ token, caseId, onLogout }: { token: string; c
   const [revision, setRevision] = useState(0)
   const [queue, setQueue] = useState<{ offset: number; items: QueueItem[]; error: string } | null>(null)
   const [detail, setDetail] = useState<{ id: string; data: AssignedHandoff | null; error: string; missing?: boolean } | null>(null)
+  const [openedCaseId, setOpenedCaseId] = useState(caseId)
+  if (openedCaseId !== caseId) {
+    setOpenedCaseId(caseId)
+    setDetail(null)
+  }
   const [busy, setBusy] = useState(false)
   const [actionIssue, setActionIssue] = useState<{ id: string; message: string } | null>(null)
   const operation = useRef<AbortController | null>(null)
@@ -89,7 +108,7 @@ export function ManagerConnected({ token, caseId, onLogout }: { token: string; c
   const hasPrevious = offset > 0
   const hasNext = !!currentPage && currentPage.items.length > managerQueuePageSize
   const selected = items.find((item) => item.handoff_id === caseId)
-  const context = detail?.id === caseId ? detail : null
+  const context = openedCaseId === caseId && detail?.id === caseId ? detail : null
   async function act(kind: 'claim' | 'resolve' | 'reply', input?: ManagerReplyInput): Promise<boolean> {
     if (!caseId || operation.current) return false
     const request = new AbortController()
@@ -137,7 +156,7 @@ export function ManagerConnected({ token, caseId, onLogout }: { token: string; c
       {context?.error && <p className="manager-feedback" role="alert">{context.error}</p>}
       {actionIssue?.id === caseId && <p className="manager-feedback" role="alert">{actionIssue.message}</p>}
       {context?.data && <>
-        <CaseDetail record={presentation(context.data.handoff, context.data.messages)} />
+        <CaseDetail record={presentation(context.data.handoff, context.data.messages, context.data.sales_context)} faq={context.data.handoff.status === 'resolved' ? <FaqReviewConnected key={caseId} token={token} handoffId={context.data.handoff.handoff_id} onUnauthorized={() => logout.current('Токен не принят. Войдите повторно.')} /> : undefined} />
         {context.data.handoff.status === 'in_progress' && <ReplyForm key={caseId} busy={busy} send={(input) => act('reply', input)} />}
       </>}
     </> : undefined} />

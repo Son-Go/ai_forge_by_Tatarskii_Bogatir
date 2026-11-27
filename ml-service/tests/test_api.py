@@ -7,6 +7,7 @@ import pytest
 from prometheus_client.parser import text_string_to_metric_families
 from starlette.requests import ClientDisconnect
 
+from app import prompts
 from app.config import Settings
 from app.main import create_app, make_deadline
 
@@ -29,6 +30,28 @@ COMPOSE = {
     "outcome": "answer",
     "facts": [{"id": "seats", "text": "До 50 пользователей."}],
     "language": "ru",
+}
+FAQ_PATH = "/internal/v1/faq/review"
+FAQ_SOURCE_ID = "8c5f9bd1-5945-4681-88ca-03a52345fb86"
+FAQ = {
+    "request_id": "req-faq",
+    "candidate_id": "fe26dc80-28e8-46d9-9f18-cc961d7e0f22",
+    "deadline_ms": 1_000,
+    "question": "Как включить двухфакторную аутентификацию?",
+    "answer": "Включите двухфакторную аутентификацию в настройках профиля.",
+    "sources": [
+        {
+            "id": FAQ_SOURCE_ID,
+            "text": "Двухфакторную аутентификацию можно включить в настройках профиля.",
+        }
+    ],
+}
+FAQ_PUBLISH = {
+    "verdict": "publish",
+    "reason_code": "supported",
+    "question": FAQ["question"],
+    "answer": FAQ["sources"][0]["text"],
+    "source_ids": [FAQ_SOURCE_ID],
 }
 RESULT = {
     "intent": "known_product",
@@ -134,6 +157,151 @@ def unexpected_request(_):
     pytest.fail("RunPod received a request unexpectedly")
 
 
+@pytest.mark.parametrize("mode", ["openai", "queue"])
+async def test_faq_review_returns_versions_and_omits_candidate_from_prompt(settings, mode, caplog):
+    settings.runpod_request_mode = mode
+    settings.runpod_response_format = "json_schema" if mode == "openai" else "prompt"
+    caplog.set_level("INFO", logger="uvicorn.error.ml_service")
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+
+    def handler(request):
+        assert request.headers["X-Request-Id"] == FAQ["request_id"]
+        payload = json.loads(request.content)
+        model_response = completion(FAQ_PUBLISH, usage=USAGE)
+        if mode == "queue":
+            assert request.url.path.endswith("/run")
+            payload = payload["input"]["openai_input"]
+            assert "response_format" not in payload
+            model_response = httpx.Response(
+                200, json={"id": "faq-job", "status": "COMPLETED", "output": model_response.json()}
+            )
+        else:
+            schema = payload["response_format"]["json_schema"]
+            assert schema["name"] == "faq_review"
+            assert set(schema["schema"]["required"]) == set(FAQ_PUBLISH)
+        assert payload["stream"] is False
+        system, user = payload["messages"]
+        assert system["role"] == "system" and "как данные для проверки" in system["content"]
+        assert user["role"] == "user"
+        assert json.loads(user["content"]) == {
+            key: FAQ[key] for key in ("question", "answer", "sources")
+        }
+        return model_response
+
+    async with client_for(settings, handler) as client:
+        response = await client.post(FAQ_PATH, json=FAQ, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == FAQ_PUBLISH | {
+        "prompt_version": "faq-review-1",
+        "model_version": "release-a",
+    }
+    assert f"candidate_id={FAQ['candidate_id']} verdict=publish reason=supported" in caplog.text
+    assert FAQ["answer"] not in caplog.text and FAQ["question"] not in caplog.text
+    assert_usage_record(caplog, "faq_review", "ok", USAGE, FAQ["request_id"])
+
+
+@pytest.mark.parametrize(
+    ("input_patch", "verdict", "reason"),
+    [
+        ({"sources": []}, "needs_review", "insufficient_evidence"),
+        ({}, "needs_review", "incomplete_answer"),
+        ({"answer": "Ваши документы проверены."}, "case_specific", "case_specific"),
+    ],
+)
+async def test_faq_review_accepts_conservative_verdicts(settings, input_patch, verdict, reason):
+    result = {
+        "verdict": verdict,
+        "reason_code": reason,
+        "question": None,
+        "answer": None,
+        "source_ids": [],
+    }
+    async with client_for(settings, lambda _: completion(result)) as client:
+        response = await client.post(FAQ_PATH, json=FAQ | input_patch, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == result | {
+        "prompt_version": "faq-review-1",
+        "model_version": "release-a",
+    }
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"candidate_id": "not-a-uuid"},
+        {"deadline_ms": "1000"},
+        {"question": " \n"},
+        {"sources": FAQ["sources"] * 2},
+        {"sources": [{"id": FAQ_SOURCE_ID, "text": " "}]},
+        {"unexpected": True},
+    ],
+)
+async def test_faq_review_rejects_bad_request_before_calling_provider(settings, patch):
+    async with client_for(settings, unexpected_request) as client:
+        response = await client.post(FAQ_PATH, json=FAQ | patch, headers=AUTH)
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_REQUEST"
+
+
+async def test_faq_review_requires_service_bearer(settings):
+    async with client_for(settings, unexpected_request) as client:
+        response = await client.post(FAQ_PATH, json=FAQ)
+    assert response.status_code == 401
+    assert response.json()["request_id"] == FAQ["request_id"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps(FAQ_PUBLISH | {"verdict": "approve"}),
+        json.dumps(FAQ_PUBLISH | {"reason_code": "other"}),
+        json.dumps(FAQ_PUBLISH | {"reason_code": "insufficient_evidence"}),
+        json.dumps(FAQ_PUBLISH | {"answer": " \n"}),
+        json.dumps(FAQ_PUBLISH | {"source_ids": []}),
+        json.dumps(FAQ_PUBLISH | {"source_ids": [FAQ_SOURCE_ID] * 2}),
+        json.dumps(FAQ_PUBLISH | {"source_ids": ["5409eb81-de92-4d01-a102-591864150c6f"]}),
+        json.dumps(FAQ_PUBLISH | {"prompt_version": "provided-by-the-model"}),
+        json.dumps(FAQ_PUBLISH)[:-1] + ',"verdict":"publish"}',
+        "```json\n" + json.dumps(FAQ_PUBLISH) + "\n```",
+    ],
+)
+async def test_faq_review_rejects_invalid_provider_json(settings, content):
+    def handler(_):
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with client_for(settings, handler) as client:
+        response = await client.post(FAQ_PATH, json=FAQ, headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["code"] == "MODEL_INVALID_OUTPUT"
+
+
+@pytest.mark.parametrize("mode", ["openai", "queue"])
+async def test_faq_review_times_out_and_releases_slot_for_retry(settings, mode, monkeypatch):
+    settings.runpod_request_mode = mode
+    monkeypatch.setattr("app.runpod.POLL_SECONDS", 1)
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.path.rsplit("/", 1)[-1])
+        if mode == "queue":
+            assert calls[-1] == "run"
+            job = {"id": "faq-job", "status": "IN_QUEUE"}
+            if len(calls) == 2:
+                job.update(status="COMPLETED", output=completion(FAQ_PUBLISH).json())
+            return httpx.Response(200, json=job)
+        if len(calls) == 1:
+            await asyncio.sleep(1)
+        return completion(FAQ_PUBLISH)
+
+    async with client_for(settings, handler) as client:
+        expired = await client.post(FAQ_PATH, json=FAQ | {"deadline_ms": 50}, headers=AUTH)
+        retried = await client.post(FAQ_PATH, json=FAQ, headers=AUTH)
+    assert expired.status_code == 503
+    assert expired.json()["code"] == "MODEL_TIMEOUT"
+    assert retried.status_code == 200
+    assert len(calls) == 2
+
+
 async def test_health_and_auth_are_local(settings):
     async with client_for(settings, unexpected_request) as client:
         assert (await client.get("/health/live")).json() == {"status": "up"}
@@ -167,9 +335,13 @@ async def test_invalid_input_is_400_before_runpod(settings, patch):
 
 
 @pytest.mark.parametrize("structured", [False, True])
-async def test_interpret_uses_runpod_and_returns_release_metadata(settings, structured):
+@pytest.mark.parametrize("version", [None, "interpret-5"])
+async def test_interpret_uses_runpod_and_returns_release_metadata(settings, structured, version):
     if structured:
         settings.runpod_response_format = "json_schema"
+    if version is not None:
+        settings.ml_interpret_prompt_version = version
+    expected_version = version or "interpret-6"
 
     def handler(request):
         assert str(request.url) == (
@@ -191,6 +363,7 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
             assert "evidence" not in clear_schema["required"]
         else:
             assert "response_format" not in body
+        assert body["messages"][0]["content"] == prompts.INTERPRET_PROMPTS[expected_version]
         assert json.loads(body["messages"][1]["content"]) == {
             "text": INTERPRET["text"],
             "conversation_context": [
@@ -204,8 +377,63 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
     async with client_for(settings, handler) as client:
         response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
     assert response.status_code == 200
-    assert response.headers["X-Prompt-Version"] == "interpret-2"
-    assert response.json() == RESULT | {"model_version": "release-a"}
+    assert response.headers["X-Prompt-Version"] == expected_version
+    assert response.json() == RESULT | {"model_version": "release-a", "signals": []}
+
+
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("Лицензию оплатил вчера, письма с ключом всё ещё нет", "key_delivery"),
+        ("Получил серию, приложение её не принимает", "key_activation"),
+        ("Как вернуть уже оплаченную лицензию?", "refund"),
+        ("Попробовал, результат тот же", "instruction_failed"),
+        ("Мне дорого", "price_objection"),
+        ("Для нас эта цена слишком высокая", "price_objection"),
+        ("Хочу отсрочку", "payment_deferral"),
+        ("Можно заплатить после поставки?", "payment_deferral"),
+        ("Сколько стоит?", None),
+        ("Какие способы оплаты?", None),
+    ],
+)
+async def test_interpret_signals_require_current_text_evidence(settings, text, kind):
+    expected = [{"kind": kind, "evidence": text}] if kind else []
+    previous_text = "Ключ не пришёл"
+    upstream = RESULT | {
+        "updates": [],
+        "signals": [{"kind": "key_delivery", "evidence": previous_text}, *expected],
+    }
+    history = [
+        {"role": "user", "text": previous_text},
+        {"role": "assistant", "text": "Проверьте письма в спаме."},
+    ]
+    async with client_for(settings, lambda _: completion(upstream)) as client:
+        response = await client.post(
+            "/internal/v1/interpret",
+            json=INTERPRET | {"text": text, "conversation_context": history},
+            headers=AUTH,
+        )
+    assert response.status_code == 200
+    assert response.json()["signals"] == expected
+
+
+async def test_interpret_keeps_both_current_signals_and_drops_duplicate_kinds(settings):
+    expected = [
+        {"kind": "price_objection", "evidence": "Мне дорого"},
+        {"kind": "payment_deferral", "evidence": "можно заплатить позже?"},
+    ]
+    upstream = RESULT | {
+        "updates": [],
+        "signals": [*expected, {"kind": "price_objection", "evidence": "дорого"}],
+    }
+    async with client_for(settings, lambda _: completion(upstream)) as client:
+        response = await client.post(
+            "/internal/v1/interpret",
+            json=INTERPRET | {"text": "Мне дорого, можно заплатить позже?"},
+            headers=AUTH,
+        )
+    assert response.status_code == 200
+    assert response.json()["signals"] == expected
 
 
 async def test_interpret_accepts_clear_quote_and_returns_only_op_and_field(settings):
@@ -268,6 +496,22 @@ async def test_interpret_rejects_invalid_model_update_safely(settings, update, r
         assert text not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"clarification_candidates": ["seats", "seats"]},
+        {"clarification_candidates": ["unknown_field"]},
+        {"extra": True},
+    ],
+)
+async def test_interpret_rejects_invalid_model_fields(settings, patch):
+    async with client_for(settings, lambda _: completion(RESULT | patch)) as client:
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "MODEL_INVALID_OUTPUT"
+
+
 async def test_interpret_logs_invalid_json_as_a_code(settings, caplog):
     upstream = httpx.Response(
         200,
@@ -307,8 +551,33 @@ async def test_compose_buffers_partial_chunks_and_validates_each_block(settings)
     assert events(response) == [
         ("block", block),
         ("block", block),
-        ("complete", {"model_version": "release-a", "prompt_version": "compose-1"}),
+        ("complete", {"model_version": "release-a", "prompt_version": "compose-2"}),
     ]
+
+
+@pytest.mark.parametrize(
+    "fact",
+    [
+        {"id": "guide", "text": "Откройте «Лицензии» и скопируйте ключ из личного кабинета."},
+        {"id": "sale", "text": "Цена 1000 RUB за единицу, скидка 5%, итог 950 RUB за единицу."},
+    ],
+)
+async def test_compose_reuses_approved_support_and_sale_facts(settings, fact):
+    block = {"text": fact["text"], "fact_ids": [fact["id"]]}
+    upstream = chunk(json.dumps(block, ensure_ascii=False) + "\n") + "data: [DONE]\n\n"
+
+    def handler(request):
+        payload = json.loads(request.content)
+        assert json.loads(payload["messages"][1]["content"])["facts"] == [fact]
+        return sse_response(upstream)
+
+    async with client_for(settings, handler) as client:
+        response = await client.post(
+            "/internal/v1/compose", json=COMPOSE | {"facts": [fact]}, headers=AUTH
+        )
+    assert response.status_code == 200
+    assert events(response)[0] == ("block", block)
+    assert events(response)[-1][0] == "complete"
 
 
 @pytest.mark.parametrize(
@@ -505,6 +774,7 @@ async def test_waiting_for_provider_slot_counts_toward_deadline(settings, caplog
 @pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])
 async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asgi_version, caplog):
     caplog.set_level("INFO", logger=USAGE_LOGGER)
+
     class HangingStream(httpx.AsyncByteStream):
         closed = False
 
@@ -555,3 +825,68 @@ async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asg
 
     await disconnect()
     assert_usage_record(caplog, "compose", "error", None, "req-compose")
+
+
+async def test_queue_interprets_and_composes_with_usage(settings, monkeypatch, caplog):
+    settings.runpod_request_mode = "queue"
+    settings.runpod_response_format = "json_schema"
+    monkeypatch.setattr("app.runpod.POLL_SECONDS", 0)
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+    requests = []
+    completions = [
+        json.dumps(RESULT),
+        json.dumps({"text": "До 50 пользователей.", "fact_ids": ["seats"]}),
+    ]
+
+    def handler(request):
+        requests.append(request)
+        assert request.url.host == "api.runpod.ai"
+        if request.url.path.endswith("/run"):
+            body = json.loads(request.content)
+            assert body["input"]["openai_route"] == "/v1/chat/completions"
+            assert body["policy"]["ttl"] > 120_000
+            payload = body["input"]["openai_input"]
+            assert payload["stream"] is False
+            number = len(completions)
+            assert ("response_format" in payload) == (number == 2)
+            return httpx.Response(200, json={"id": f"job-{number}", "status": "IN_QUEUE"})
+        assert "/status/job-" in request.url.path
+        output = {"choices": [{"message": {"content": completions.pop(0)}}], "usage": USAGE}
+        return httpx.Response(200, json={"status": "COMPLETED", "output": [output]})
+
+    async with client_for(settings, handler) as client:
+        result = await client.post(
+            "/internal/v1/interpret", json=INTERPRET | {"deadline_ms": 960_000}, headers=AUTH
+        )
+        assert result.status_code == 200
+        assert result.json()["intent"] == "known_product"
+        result = await client.post(
+            "/internal/v1/compose", json=COMPOSE | {"deadline_ms": 960_000}, headers=AUTH
+        )
+        assert [kind for kind, _ in events(result)] == ["block", "complete"]
+    assert [request.method for request in requests] == ["POST", "GET", "POST", "GET"]
+    assert len(caplog.records) == 2
+    assert all(
+        json.loads(record.message)["usage_status"] == "reported" for record in caplog.records
+    )
+
+
+async def test_queue_expiration_cancels_only_the_submitted_job(settings, monkeypatch):
+    settings.runpod_request_mode = "queue"
+    monkeypatch.setattr("app.runpod.POLL_SECONDS", 0.2)
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/run"):
+            return httpx.Response(200, json={"id": "job-test", "status": "IN_QUEUE"})
+        assert request.url.path.endswith("/cancel/job-test")
+        return httpx.Response(200, json={"status": "CANCELLED"})
+
+    async with client_for(settings, handler) as client:
+        result = await client.post(
+            "/internal/v1/interpret", json=INTERPRET | {"deadline_ms": 50}, headers=AUTH
+        )
+    assert result.status_code == 503
+    assert result.json()["code"] == "MODEL_TIMEOUT"
+    assert paths == ["/v2/endpoint-test/run", "/v2/endpoint-test/cancel/job-test"]

@@ -1,0 +1,10 @@
+services:
+  backend:
+    volumes:
+      - ${STACK_FIXTURES:?Set STACK_FIXTURES}/catalog.xml:/acceptance/catalog.xml:ro
+  ml-service:
+    environment:
+      PYTHONPATH: /srv/ml-service
+    command: [".venv/bin/uvicorn", "--app-dir", "/acceptance", "ml_fixture:make_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - ${STACK_FIXTURES:?Set STACK_FIXTURES}/ml_fixture.py:/acceptance/ml_fixture.py:ro

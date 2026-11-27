@@ -62,11 +62,11 @@ test('client has no manual handoff and navigation preserves its draft', async ({
 test('quote uses the feature flag and confirmed selection and downloads a marked demo PDF', async ({ page }, testInfo) => {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /Поможем найти/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Подготовить КП' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Сформировать КП' })).toHaveCount(0)
   await page.getByRole('textbox', { name: 'Ваше сообщение' }).fill('Подобрать решение на 50 пользователей')
   await page.getByRole('button', { name: 'Отправить', exact: true }).click()
   await page.getByRole('button', { name: 'Выбрать', exact: true }).click()
-  await page.getByRole('button', { name: 'Подготовить КП' }).click()
+  await page.getByRole('button', { name: 'Сформировать КП' }).click()
   const customer = page.getByRole('textbox', { name: 'Наименование заказчика' })
   await expect(customer).toBeFocused()
   await customer.fill('Демонстрационный заказчик')

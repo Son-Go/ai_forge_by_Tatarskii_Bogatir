@@ -110,6 +110,82 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/manager/handoffs/{handoff_id}/faq": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        /** @description Возвращает результат проверки для своего закрытого обращения. Если кандидата нет, возвращает candidate=null. */
+        get: operations["readHandoffFaq"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/manager/handoffs/{handoff_id}/faq/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Публикует исправленный общий ответ из needs_review со свежим источником из справки. Повтор с теми же данными возвращает опубликованную запись. FAQ_SOURCE_UNAVAILABLE означает, что требуется свежий источник, FAQ_DUPLICATE — что вопрос уже опубликован с той же областью применимости. */
+        post: operations["approveHandoffFaq"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/manager/handoffs/{handoff_id}/faq/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Отклоняет кандидата, ожидающего ручной проверки. */
+        post: operations["rejectHandoffFaq"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/manager/handoffs/{handoff_id}/faq/unpublish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Снимает опубликованный FAQ с поиска. Сохраняет связь с обращением. */
+        post: operations["unpublishHandoffFaq"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -124,7 +200,7 @@ export interface components {
         Handoff: {
             handoff_id: components["schemas"]["Uuid"];
             /** @enum {unknown} */
-            reason: "document_review" | "off_catalog_order";
+            reason: "document_review" | "off_catalog_order" | "instruction_failed" | "payment_deferral";
             /** @enum {unknown} */
             status: "queued" | "in_progress" | "resolved";
             /** Format: date-time */
@@ -132,6 +208,48 @@ export interface components {
         };
         QueueItem: components["schemas"]["Handoff"] & {
             session_id: components["schemas"]["Uuid"];
+        };
+        SalesContext: {
+            offer: components["schemas"]["OfferCard"] | null;
+            quote: {
+                quote_id: components["schemas"]["Uuid"];
+                quantity: number;
+                approved: boolean;
+                discount_percent?: string;
+                agreed_total?: string | null;
+                price?: components["schemas"]["Price"] | null;
+            } | null;
+        };
+        FaqApproval: {
+            question: string;
+            answer: string;
+            /** Format: uuid */
+            source_id: string;
+            product?: string;
+            /** @description Допустима вместе с продуктом */
+            edition?: string;
+        };
+        FaqCandidate: {
+            /** Format: uuid */
+            candidate_id: string;
+            /** @enum {unknown} */
+            status: "queued" | "published" | "needs_review" | "case_specific" | "rejected" | "unpublished";
+            reason_code?: string | null;
+            attempts: number;
+            question?: string | null;
+            answer?: string | null;
+            product?: string | null;
+            edition?: string | null;
+            /** Format: uuid */
+            source_id?: string | null;
+            sources: {
+                /** Format: uuid */
+                id: string;
+                title: string;
+                /** Format: uri */
+                url: string;
+                text: string;
+            }[];
         };
         /** Format: uuid */
         Uuid: string;
@@ -148,6 +266,8 @@ export interface components {
             price: components["schemas"]["Price"] | null;
             /** @enum {unknown} */
             availability: "available" | "unavailable" | "unknown";
+            /** @description Сервер разрешает выбрать позицию. Позиция со статусом unavailable доступна для выбора при подтверждённой цене. */
+            selectable?: boolean;
             attributes: Record<string, never>;
             source_ids: string[];
         };
@@ -191,6 +311,17 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["QueueItem"];
+            };
+        };
+        /** @description Состояние кандидата и текущие выдержки справки */
+        FaqReview: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    candidate: components["schemas"]["FaqCandidate"] | null;
+                };
             };
         };
         /** @description Ошибка до открытия SSE */
@@ -282,6 +413,8 @@ export interface operations {
                 content: {
                     "application/json": {
                         handoff: components["schemas"]["QueueItem"];
+                        /** @description Снимок выбранной позиции и версии КП на момент передачи просьбы об отсрочке. */
+                        sales_context?: components["schemas"]["SalesContext"] | null;
                         messages: components["schemas"]["ChatMessage"][];
                     };
                 };
@@ -352,6 +485,84 @@ export interface operations {
         requestBody?: never;
         responses: {
             200: components["responses"]["QueueItem"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    readHandoffFaq: {
+        parameters: {
+            query?: {
+                /** @description Поиск свежих выдержек справки для ручной проверки */
+                source_query?: string;
+            };
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["FaqReview"];
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    approveHandoffFaq: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FaqApproval"];
+            };
+        };
+        responses: {
+            200: components["responses"]["FaqReview"];
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    rejectHandoffFaq: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["FaqReview"];
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    unpublishHandoffFaq: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handoff_id: components["parameters"]["HandoffId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["FaqReview"];
+            400: components["responses"]["Error"];
             401: components["responses"]["Error"];
             404: components["responses"]["Error"];
             409: components["responses"]["Error"];

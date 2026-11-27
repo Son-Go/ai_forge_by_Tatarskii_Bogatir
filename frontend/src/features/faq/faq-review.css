@@ -1,0 +1,27 @@
+.faq-review { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); background: var(--surface-card); font-size: var(--text-body-sm); min-width: 0; overflow-wrap: anywhere; }
+.faq-review-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
+.faq-review-heading h3 { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-body); font-weight: var(--weight-semibold); }
+.faq-review-heading h3 svg { width: 17px; height: 17px; color: var(--accent); }
+.faq-review-status { padding: 3px var(--space-2); background: var(--surface-muted); color: var(--muted); border-radius: var(--radius-sm); font-size: var(--text-xs); }
+.faq-review-status.is-published { color: var(--success); background: var(--success-soft); }
+.faq-review-status.needs-review { color: var(--warning); background: var(--warning-soft); }
+.faq-review-reason { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-3); background: var(--warning-soft); border-radius: var(--radius-sm); color: var(--warning); }
+.faq-review-reason svg { width: 16px; height: 16px; margin-top: 2px; }
+.faq-review-copy { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.faq-review-copy h4 { margin: 0 0 var(--space-1); font-size: var(--text-xs); font-weight: var(--weight-medium); color: var(--muted); }
+.faq-review-copy p { white-space: pre-wrap; }
+.faq-review .sources { max-width: 100%; width: 100%; margin: var(--space-3) 0 0; }
+.faq-review-source-missing { margin-top: var(--space-3); }
+.faq-review fieldset { display: grid; gap: var(--space-2); min-width: 0; margin: var(--space-3) 0 0; padding: 0; border: 0; }
+.faq-review textarea { min-width: 0; width: 100%; max-width: 100%; min-height: 64px; resize: vertical; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: var(--space-3); font-size: var(--text-base); line-height: var(--line-body); }
+.faq-review-confirm { display: flex; align-items: flex-start; gap: var(--space-2); margin: var(--space-2) 0; cursor: pointer; }
+.faq-review-confirm input { width: 18px; height: 18px; flex-shrink: 0; margin: 2px 0 0; accent-color: var(--action); }
+.faq-review-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.faq-review button { min-height: 44px; max-width: 100%; }
+.faq-review > .quiet-action { margin-top: var(--space-3); }
+.faq-review-operation, .faq-review-error { margin-top: var(--space-3); }
+.faq-review-error { color: var(--warning); }
+@media (max-width: 700px) { .faq-review-actions > button { flex: 1 1 140px; } }
+@media (prefers-reduced-motion: no-preference) { .faq-review { animation: surface-enter var(--duration-enter) var(--ease-out) backwards; } }
+.faq-review-source-controls input, .faq-review-source-controls select { width: 100%; min-width: 0; margin-top: var(--space-1); }
+.faq-review-source-controls fieldset { padding: var(--space-2); background: var(--surface-muted); border-radius: var(--radius-sm); }

@@ -19,7 +19,8 @@ export async function approveQuoteDraft(sessionId: string, quoteId: string, sign
 
 export async function requestInvoiceDraft(sessionId: string, quoteId: string, signal: AbortSignal) {
   const input: components['schemas']['InvoiceDraftRequest'] = { quote_id: quoteId }
-  return readPdf(await postDocument(sessionId, '/invoice-drafts', signal, input))
+  const response = await postDocument(sessionId, '/invoice-drafts', signal, input)
+  return { blob: await readPdf(response), testPayment: response.headers.get('X-Invoice-Purpose') === 'test_payment' }
 }
 
 async function postDocument(sessionId: string, path: string, signal: AbortSignal, body?: QuoteDraftInput | components['schemas']['InvoiceDraftRequest']) {

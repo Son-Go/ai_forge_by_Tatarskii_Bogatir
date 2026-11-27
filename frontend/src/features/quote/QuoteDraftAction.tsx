@@ -12,7 +12,7 @@ export function QuoteDraftAction({ sessionId, demo, onRefresh, onOfferChanged }:
   const [quantity, setQuantity] = useState('1')
   const formId = useId()
   const customerInput = useRef<HTMLInputElement>(null)
-  const [quote, setQuote] = useState<{ id: string; approved: boolean } | null>(null)
+  const [quote, setQuote] = useState<{ id: string; approved: boolean; testPayment?: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
@@ -32,6 +32,7 @@ export function QuoteDraftAction({ sessionId, demo, onRefresh, onOfferChanged }:
       if (current.signal.aborted) return
       setNotice('')
       if (cause instanceof ApiError && ['OFFER_CHANGED', 'QUOTE_SUPERSEDED', 'QUOTE_NOT_FOUND'].includes(cause.body.code)) setQuote(null)
+      if (cause instanceof ApiError && cause.body.code === 'QUOTE_APPROVAL_REQUIRED') setQuote((current) => current && { ...current, approved: false })
       if (cause instanceof ApiError && cause.body.code === 'OFFER_CHANGED') onOfferChanged(cause.body.updated_offer)
       setError(cause instanceof ApiError && cause.body.code === 'OFFER_CHANGED'
         ? 'Предложение изменилось. Подтвердите актуальную карточку, затем сформируйте и одобрите новое КП.'
@@ -53,8 +54,16 @@ export function QuoteDraftAction({ sessionId, demo, onRefresh, onOfferChanged }:
         : 'КП подготовлено. Скачивание начато.')
     })
   }
+  async function downloadInvoice(quoteId: string, signal: AbortSignal) {
+    const { blob, testPayment } = await requestInvoiceDraft(sessionId, quoteId, signal)
+    if (signal.aborted) return
+    const filename = testPayment ? 'test-payment-invoice.pdf' : 'invoice-for-review.pdf'
+    downloadDraft(blob, demo ? `DEMO-${filename}` : filename)
+    setQuote((current) => current?.id === quoteId ? { ...current, testPayment } : current)
+    setNotice(testPayment ? 'Скачивание тестового счёта на оплату начато.' : 'Скачивание счёта для согласования начато.')
+  }
   return <section className="quote-draft" aria-label="Коммерческое предложение">
-    <button type="button" className="quiet-action" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls={formId} disabled={busy}><Icon name="file" />Подготовить КП</button>
+    <button type="button" className="quiet-action" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls={formId} disabled={busy}><Icon name="file" />Сформировать КП</button>
     {open && <form className="quote-form" id={formId} aria-label="Параметры коммерческого предложения" onSubmit={(event) => { event.preventDefault(); create() }}>
       <label htmlFor={`${formId}-customer`}>Наименование заказчика</label>
       <input ref={customerInput} id={`${formId}-customer`} name="customer_name" autoComplete="organization" maxLength={160} required value={customer} disabled={busy} onChange={(event) => { setCustomer(event.target.value); clearDocument() }} />
@@ -67,18 +76,19 @@ export function QuoteDraftAction({ sessionId, demo, onRefresh, onOfferChanged }:
     {busy && <p className="document-status" role="status">Обрабатываем запрос…</p>}
     {!busy && notice && <p className="document-status" role="status">{notice}</p>}
     {quote && <div className="quote-approval">
+      {quote.testPayment !== undefined && <p className="muted">{quote.testPayment
+        ? 'Счёт на оплату. Тестовый выпуск.'
+        : 'Счёт для согласования. Оплата по этому документу не предусмотрена.'}</p>}
       {quote.approved
-        ? <button type="button" className="accent-action" disabled={busy} onClick={() => void run(async (signal) => {
-          const pdf = await requestInvoiceDraft(sessionId, quote.id, signal)
-          if (!signal.aborted) {
-            downloadDraft(pdf, demo ? 'DEMO-invoice.pdf' : 'invoice.pdf')
-            setNotice('Скачивание счёта начато.')
-          }
-        })}><Icon name="download" />Скачать счёт</button>
+        ? <button type="button" className="accent-action" disabled={busy} onClick={() => void run((signal) => downloadInvoice(quote.id, signal))}>
+          <Icon name="download" />{quote.testPayment ? 'Скачать тестовый счёт на оплату'
+            : quote.testPayment === false ? 'Скачать счёт для согласования' : 'Скачать счёт'}</button>
         : <button type="button" className="quiet-action" disabled={busy} onClick={() => void run(async (signal) => {
           await approveQuoteDraft(sessionId, quote.id, signal)
-          if (!signal.aborted) { setQuote({ ...quote, approved: true }); setNotice('КП одобрено.') }
-        })}>Одобрить КП</button>}
+          if (signal.aborted) return
+          setQuote({ ...quote, approved: true })
+          await downloadInvoice(quote.id, signal)
+        })}>Одобрить КП и получить счёт</button>}
     </div>}
     {error && <div className="document-error" role="alert"><p>{error}</p><button type="button" onClick={onRefresh}>Обновить состояние</button></div>}
   </section>

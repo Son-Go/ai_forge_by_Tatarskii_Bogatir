@@ -183,7 +183,7 @@ paths:
     post:
       operationId: createInvoiceDraft
       summary: Получить PDF счёта по одобренному КП
-      description: Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. Повтор для того же quote_id возвращает ранее выданный PDF. Документ предназначен для согласования и содержит справочные реквизиты поставщика.
+      description: Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует CHAT_QUOTES_ENABLED=true и явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. При CHAT_TEST_PAYMENT_INVOICES_ENABLED=true новый PDF «Счёт на оплату» содержит пробный номер и реквизиты поставщика. В обычном режиме выдаётся счёт для согласования. Повтор для того же quote_id возвращает сохранённый документ с исходным назначением.
       requestBody:
         required: true
         content:
@@ -191,10 +191,15 @@ paths:
             schema: { $ref: '#/components/schemas/InvoiceDraftRequest' }
       responses:
         '200':
-          description: PDF счёта для согласования
+          description: PDF счёта для согласования или тестовый счёт на оплату
           headers:
             Content-Disposition:
               schema: { type: string }
+            X-Invoice-Purpose:
+              schema: { type: string, enum: [agreement, test_payment] }
+            X-Invoice-Number:
+              description: Присутствует только у тестового счёта на оплату.
+              schema: { type: string, pattern: '^TEST-[0-9]{8,}$' }
           content:
             application/pdf:
               schema: { type: string, format: binary }
@@ -280,6 +285,11 @@ components:
             - $ref: '#/components/schemas/Turn'
             - type: 'null'
         quotes_enabled: { type: boolean }
+        price_terms:
+          $ref: '#/components/schemas/PriceTerms'
+        support_topic:
+          enum: [key_delivery, key_activation, refund]
+          description: Тема выданной инструкции, по которой можно сообщить, что она не помогла.
     Turn:
       type: object
       required: [turn_id, status]
@@ -312,8 +322,19 @@ components:
             - $ref: '#/components/schemas/Price'
             - type: 'null'
         availability: { enum: [available, unavailable, unknown] }
+        selectable:
+          type: boolean
+          description: Сервер разрешает выбрать позицию. Позиция со статусом unavailable доступна для выбора при подтверждённой цене.
         attributes: { type: object }
         source_ids: { type: array, items: { type: string } }
+    PriceTerms:
+      type: object
+      required: [base_amount, discount_percent, final_amount, currency]
+      properties:
+        base_amount: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
+        discount_percent: { type: string, description: Подтверждённый процент скидки от 0 до 5 }
+        final_amount: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
     Price:
       type: object
       required: [amount, currency]

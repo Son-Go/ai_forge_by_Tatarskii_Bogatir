@@ -17,6 +17,8 @@ curl --fail http://localhost:8080/health/live
 
 Корневой Compose собирает цели `backend`, `ml-service` и `caddy` из общего [Dockerfile](../Dockerfile) и запускает PostgreSQL из образа `postgres:17`. Образ Caddy собирает фронтенд из зафиксированных зависимостей и раздаёт его по адресу `http://localhost:8080`. Flyway применяет схему при старте Java. `/health/ready` показывает `200` после появления активного снимка каталога.
 
+Для запуска панели Runpod в том же стеке настройте `runpod-panel/.env` и добавьте `COMPOSE_PROFILES=runpod-panel` в корневой `.env`. После этого `docker compose up -d --build` поднимает весь стенд, а `docker compose down` завершает все его контейнеры с сохранением томов. [Настройка панели и перенос её состояния](../runpod-panel/README.md).
+
 Для проверки RunPod на синтетических данных заполните `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, имя модели на endpoint в `RUNPOD_MODEL` и метку её версии в `RUNPOD_MODEL_VERSION`. Задайте отдельный токен внутреннего HTTP API в `ML_SERVICE_TOKEN`. Проверочные запросы к FastAPI описаны в инструкции ML-сервиса. [Настройки FastAPI](../ml-service/README.md)
 
 Для полного модельного сценария нужны активный каталог и подключение Spring Boot к FastAPI. В подтверждённом российском контуре задайте `ML_BASE_URL=http://ml-service:8000` и `ML_DATA_REGION=RU`. Оба сервиса получают один `ML_SERVICE_TOKEN` из корневого `.env`. Для импорта каталога укажите `CATALOG_FEED_URL` либо смонтируйте файл в контейнер backend и укажите путь через `CATALOG_FEED_FILE`. [Архитектура](../ARCHITECTURE.md) · [Настройки бэкенда](../backend/README.md)

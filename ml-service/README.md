@@ -2,19 +2,42 @@
 
 Spring Boot вызывает FastAPI по адресу `http://ml-service:8000` в сети Compose. FastAPI формирует промпты, отправляет запросы в RunPod Serverless и валидирует ответы. Spring Boot ведёт сессии и каталог, проверяет коммерческие утверждения и обслуживает публичный API. [Внутренний OpenAPI](../contracts/internal.openapi.yaml).
 
-- `POST /internal/v1/interpret` возвращает намерение и изменения требований. Поле `model_version` содержит версию релиза, заголовок `X-Prompt-Version` — версию промпта.
-- `POST /internal/v1/compose` возвращает SSE. Каждое событие `block` содержит законченный текст и ссылки на факты этого запроса. Поток завершается `complete` с версиями или `failed` с кодом ошибки. Spring Boot сверяет смысл утверждений с источниками перед отправкой текста в чат.
+- `POST /internal/v1/interpret` возвращает намерение, изменения требований и сигналы о поддержке после покупки, возражении о цене и отсрочке. Каждый сигнал содержит дословную цитату текущей реплики. Поле `model_version` содержит версию релиза, заголовок `X-Prompt-Version` — версию промпта.
+- `POST /internal/v1/compose` возвращает SSE из подтверждённых Java фактов, включая шаги из справки, цену, скидку и итог. Каждое событие `block` содержит законченный текст и ссылки на факты этого запроса. Поток завершается `complete` с версиями или `failed` с кодом ошибки. Spring Boot отправляет клиенту собственный текст фактов и добавляет ссылки.
+- `POST /internal/v1/faq/review` проверяет обезличенные вопрос и ответ менеджера по переданным выдержкам. Возвращает вердикт `publish`, `needs_review` или `case_specific`, причину, предложенные формулировки и версии промпта и модели. Таймаут и нарушение схемы модельного ответа возвращаются с HTTP `503`, чтобы Java могла повторить фоновый вызов. Реальные обращения проверяются в согласованном российском контуре.
 - `GET /health/live` проверяет процесс. `GET /health/ready` проверяет загрузку локальной конфигурации. Оба маршрута работают без вызова GPU.
 
-Модельные запросы требуют `Authorization: Bearer <ML_SERVICE_TOKEN>`, `request_id` и остаток дедлайна `deadline_ms`. В Spring Boot холодный ход по умолчанию получает 180 секунд, обычный — 90 секунд. FastAPI использует переданный остаток с верхней границей 180 секунд. Ожидание свободного слота, холодный запуск RunPod и генерация расходуют этот бюджет.
+Модельные запросы требуют `Authorization: Bearer <ML_SERVICE_TOKEN>`, `request_id` и остаток дедлайна `deadline_ms`. В Spring Boot холодный ход по умолчанию получает 180 секунд, обычный — 90 секунд. FastAPI использует переданный остаток с верхней границей 180 секунд для OpenAI-совместимого маршрута и 20 минут для режима очереди. Ожидание свободного слота, холодный запуск RunPod и генерация расходуют этот бюджет.
 
 Ошибка входа возвращается с HTTP 400, ошибка авторизации — 401, проблема модели до начала потока — 503. Коды `MODEL_TIMEOUT`, `MODEL_UNAVAILABLE` и `MODEL_INVALID_OUTPUT` также передаются в SSE `failed`, если поток уже открыт. Закрытие внутреннего SSE закрывает соединение с RunPod. Обработку повторов хода выполняет Java.
+
+## Контрольный прогон модели
+
+Из корня репозитория запустите сценарии поддержки, оплаты, подбора товаров и композиции подтверждённых фактов. Скрипт передаёт настроенному профилю из `.env` только синтетические реплики и факты.
+
+```bash
+PYTHONPATH=ml-service uv run --locked --project ml-service --env-file .env python ml-service/tests/live_clarifications.py
+```
+
+В режиме очереди при долгом холодном старте добавьте `--cold-deadline-ms 600000`.
+Лимит режима вызова применяется и к этому параметру. Для сравнения запустите тот же набор с
+`--interpret-version interpret-5 --interpret-only` и `--interpret-version interpret-6 --interpret-only`.
+Сохраните один профиль и формат вызова на обоих прогонах. Отчёт фиксирует `request_id`,
+`X-Prompt-Version`, версию релиза, имя модели из ответа RunPod и результат проверок
+JSON, намерения, товара, изменений, цитат, уточнений и сигналов.
+
+По умолчанию используется `interpret-6`. Для отката установите
+`ML_INTERPRET_PROMPT_VERSION=interpret-5` в окружении и пересоздайте сервис
+через `docker compose up -d ml-service`. Режим можно использовать и при локальном
+запуске Uvicorn через его файл окружения.
 
 ## Профиль RunPod
 
 1. Разверните RunPod Serverless endpoint на vLLM. Для базовой проверки подходит `MODEL_NAME=Qwen/Qwen3-32B-AWQ`. Для командного релиза укажите репозиторий AWQ-весов и зафиксируйте `MODEL_REVISION`. При использовании приватных весов передайте `HF_TOKEN` через секреты RunPod. [Переменные воркера vLLM](https://docs.runpod.io/serverless/vllm/environment-variables).
 2. Скопируйте `.env.example` в `.env` внутри `ml-service`. Заполните `RUNPOD_ENDPOINT_ID` и `RUNPOD_API_KEY`, задайте собственное значение `ML_SERVICE_TOKEN` и используйте его в Spring Boot. `RUNPOD_MODEL` соответствует имени из RunPod, `RUNPOD_MODEL_VERSION` идентифицирует релиз для журнала. FastAPI вызывает `https://api.runpod.ai/v2/<endpoint_id>/openai/v1/chat/completions`. [OpenAI-совместимый API RunPod](https://docs.runpod.io/serverless/vllm/openai-compatibility).
 3. Используйте шаблон модели с поддержкой `enable_thinking`. FastAPI передаёт `chat_template_kwargs: {"enable_thinking": false}` и `temperature: 0` в каждом запросе `interpret` и `compose`. [Параметры запроса vLLM](https://docs.vllm.ai/en/latest/features/reasoning_outputs/#request-level-override).
+В локальном стенде с Runpod Serverless и долгой очередью задайте `RUNPOD_REQUEST_MODE=queue`, `CHAT_TURN_TIMEOUT_MS=1200000` и `CHAT_COLD_TURN_TIMEOUT_MS=1200000` в корневом `.env`. ML отправляет каждую задачу vLLM один раз через `/run`, использует оставшийся бюджет хода для TTL и читает результат через `/status`. Для композиции готовый текст разбирается на проверенные блоки и передаётся по внутреннему SSE. Учёт токенов использует `usage` из завершённой задачи. Для этого режима нужен совместимый worker-vLLM. [Операции очереди Runpod](https://docs.runpod.io/serverless/endpoints/operation-reference)
+
 4. Начните с `RUNPOD_RESPONSE_FORMAT=prompt`. Сервис запрашивает JSON в промпте и проверяет его схемой. После проверки совместимости выбранного воркера можно задать `RUNPOD_RESPONSE_FORMAT=json_schema` для `interpret`. Модельный поток `compose` использует один JSON-объект на строку. [Структурированные ответы vLLM](https://docs.vllm.ai/en/latest/features/structured_outputs/).
 
 `RUNPOD_MAX_CONCURRENCY` ограничивает параллельные вызовы на процесс FastAPI. `ML_MAX_CONTEXT_BYTES` ограничивает размер сериализованного контекста. При изменении контекстного окна RunPod учитывайте системный промпт и лимит генерации.

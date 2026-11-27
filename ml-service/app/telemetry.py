@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 from prometheus_client import CollectorRegistry, Counter
 from pydantic import BaseModel, Field, ValidationError
 
-Stage = Literal["interpret", "compose"]
+Stage = Literal["interpret", "compose", "faq_review"]
 # Prometheus stores counter samples as float64.
 TokenCount = Annotated[int, Field(strict=True, ge=0, le=2**53 - 1)]
 logger = logging.getLogger("uvicorn.error.runpod.usage")
@@ -20,10 +20,12 @@ tokens = Counter(
     "ml_runpod_tokens", "Tokens reported by RunPod", ("stage", "direction"), registry=registry
 )
 calls = Counter(
-    "ml_runpod_calls", "RunPod calls by usage availability", ("stage", "usage_status"),
+    "ml_runpod_calls",
+    "RunPod calls by usage availability",
+    ("stage", "usage_status"),
     registry=registry,
 )
-for stage in ("interpret", "compose"):
+for stage in ("interpret", "compose", "faq_review"):
     for direction in ("input", "output"):
         tokens.labels(stage, direction)
     for usage_status in ("reported", "missing"):

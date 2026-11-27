@@ -4,7 +4,10 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, StringConstraints, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .prompts import INTERPRET_VERSION
+
 MAX_DEADLINE_MS = 180_000
+QUEUE_MAX_DEADLINE_MS = 1_200_000
 
 SettingText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 EndpointId = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]+$")]
@@ -22,8 +25,14 @@ class Settings(BaseSettings):
     runpod_model: SettingText | None = None
     runpod_model_version: SettingText | None = None
     runpod_max_concurrency: int = Field(default=1, ge=1, le=16)
+    runpod_request_mode: Literal["openai", "queue"] = "openai"
     runpod_response_format: Literal["prompt", "json_schema"] = "prompt"
+    ml_interpret_prompt_version: Literal["interpret-5", "interpret-6"] = INTERPRET_VERSION
     ml_max_context_bytes: int = Field(default=24_000, ge=4_000, le=100_000)
+
+    @property
+    def model_deadline_limit_ms(self) -> int:
+        return QUEUE_MAX_DEADLINE_MS if self.runpod_request_mode == "queue" else MAX_DEADLINE_MS
 
     @field_validator("ml_service_token", "runpod_api_key")
     @classmethod

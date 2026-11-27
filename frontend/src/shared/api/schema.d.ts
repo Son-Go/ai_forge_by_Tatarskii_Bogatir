@@ -140,7 +140,7 @@ export interface paths {
         put?: never;
         /**
          * Получить PDF счёта по одобренному КП
-         * @description Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. Повтор для того же quote_id возвращает ранее выданный PDF. Документ предназначен для согласования и содержит справочные реквизиты поставщика.
+         * @description Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует CHAT_QUOTES_ENABLED=true и явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. При CHAT_TEST_PAYMENT_INVOICES_ENABLED=true новый PDF «Счёт на оплату» содержит пробный номер и реквизиты поставщика. В обычном режиме выдаётся счёт для согласования. Повтор для того же quote_id возвращает сохранённый документ с исходным назначением.
          */
         post: operations["createInvoiceDraft"];
         delete?: never;
@@ -202,6 +202,12 @@ export interface components {
             selected_offer: components["schemas"]["OfferCard"] | null;
             last_turn: components["schemas"]["Turn"] | null;
             quotes_enabled: boolean;
+            price_terms?: components["schemas"]["PriceTerms"];
+            /**
+             * @description Тема выданной инструкции, по которой можно сообщить, что она не помогла.
+             * @enum {unknown}
+             */
+            support_topic?: "key_delivery" | "key_activation" | "refund";
         };
         Turn: {
             turn_id: components["schemas"]["Uuid"];
@@ -231,8 +237,17 @@ export interface components {
             price: components["schemas"]["Price"] | null;
             /** @enum {unknown} */
             availability: "available" | "unavailable" | "unknown";
+            /** @description Сервер разрешает выбрать позицию. Позиция со статусом unavailable доступна для выбора при подтверждённой цене. */
+            selectable?: boolean;
             attributes: Record<string, never>;
             source_ids: string[];
+        };
+        PriceTerms: {
+            base_amount: string;
+            /** @description Подтверждённый процент скидки от 0 до 5 */
+            discount_percent: string;
+            final_amount: string;
+            currency: string;
         };
         Price: {
             amount: string;
@@ -531,10 +546,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description PDF счёта для согласования */
+            /** @description PDF счёта для согласования или тестовый счёт на оплату */
             200: {
                 headers: {
                     "Content-Disposition"?: string;
+                    "X-Invoice-Purpose"?: "agreement" | "test_payment";
+                    /** @description Присутствует только у тестового счёта на оплату. */
+                    "X-Invoice-Number"?: string;
                     [name: string]: unknown;
                 };
                 content: {

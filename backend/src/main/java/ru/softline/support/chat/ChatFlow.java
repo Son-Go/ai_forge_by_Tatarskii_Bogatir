@@ -47,7 +47,7 @@ class ChatFlow {
              @Value("${chat.cold-turn-timeout-ms}") long coldTimeoutMillis,
              @Value("${chat.model-idle-ms}") long modelIdleMillis) {
         if (parallel < 1 || warmTimeoutMillis < 100 || coldTimeoutMillis < warmTimeoutMillis
-                || coldTimeoutMillis > 300_000 || modelIdleMillis < 1 || modelIdleMillis > 86_400_000) {
+                || coldTimeoutMillis > 1_200_000 || modelIdleMillis < 1 || modelIdleMillis > 86_400_000) {
             throw new IllegalArgumentException("Invalid turn limits");
         }
         this.store = store;
@@ -152,12 +152,14 @@ class ChatFlow {
         }
         Map<String, Object> old = store.requirements(turn);
         String activeHandoff = store.activeHandoffReason(turn.sessionId());
-        Reply direct = activeHandoff == null ? planner.explicitHandoff(turn.userText())
+        String supportTopic = store.supportTopic(turn.sessionId());
+        Reply direct = activeHandoff == null ? planner.explicitHandoff(turn.userText(), old)
                 : Reply.handoff(activeHandoff, "Сообщение добавлено к обращению. Менеджер увидит его в этом диалоге.");
+        if (direct == null) direct = planner.commercialSupport(turn.userText(), supportTopic, null);
+        if (direct == null) direct = store.directPricingReply(turn);
+        if (direct == null) direct = planner.commercialGuide(turn.userText());
         if (direct != null) {
-            Done answer = store.complete(turn, direct, old, false, null, null);
-            send(emitter, "done", answer);
-            timing.outcome = answer.outcome();
+            finishDirect(turn, emitter, timing, old, direct);
             return;
         }
         send(emitter, "status", Map.of("stage", "interpreting"));
@@ -179,19 +181,32 @@ class ChatFlow {
             sendFailure(emitter, turn, code, true);
             return;
         }
+        Reply support = planner.commercialSupport(turn.userText(), supportTopic, interpretation);
+        if (support == null) support = store.pricingReply(turn, interpretation);
+        if (support != null) {
+            finishDirect(turn, emitter, timing, old, support);
+            return;
+        }
         long searchStarted = System.nanoTime();
-        Map<String, Object> next;
+        Map<String, Object> saved;
         Reply reply;
         try {
-            next = planner.apply(old, interpretation, turn.userText());
             send(emitter, "status", Map.of("stage", "searching"));
-            reply = planner.plan(turn, interpretation, next);
+            if (planner.isProductQuestion(turn.userText(), interpretation)) {
+                saved = old;
+                reply = planner.question(turn, interpretation, old);
+            } else {
+                saved = planner.apply(old, interpretation, turn.userText());
+                reply = planner.plan(turn, interpretation, saved);
+            }
         } finally {
             timing.searchMs = elapsedMillis(searchStarted);
         }
         Set<String> sent = new HashSet<>();
         String promptVersion = null;
-        if ("answer".equals(reply.outcome()) || "recommend".equals(reply.outcome())) {
+        // Only answers that combine several excerpts need model composition.
+        if ("answer".equals(reply.outcome()) && reply.cards().isEmpty() && reply.facts().size() > 1
+                && reply.sources().size() > 1) {
             send(emitter, "status", Map.of("stage", "generating"));
             try {
                 long compositionStarted = System.nanoTime();
@@ -214,9 +229,16 @@ class ChatFlow {
                 if (sent.add(fact.id())) append(turn, emitter, fact.text(), sent.size() > 1, timing);
             }
         }
-        Map<String, Object> saved = "product_question".equals(interpretation.intent()) ? old : next;
         Done answer = store.complete(turn, reply, saved, !old.equals(saved), validVersion(interpretation.modelVersion()),
                 validVersion(promptVersion));
+        send(emitter, "done", answer);
+        timing.outcome = answer.outcome();
+    }
+
+    private void finishDirect(Turn turn, SseEmitter emitter, TurnTiming timing, Map<String, Object> requirements,
+                              Reply reply) throws IOException {
+        if (reply.handoffReason() == null) append(turn, emitter, reply.facts().getFirst().text(), false, timing);
+        Done answer = store.complete(turn, reply, requirements, false, null, null);
         send(emitter, "done", answer);
         timing.outcome = answer.outcome();
     }
@@ -293,8 +315,11 @@ class ChatFlow {
 
     private static void sendFailure(SseEmitter emitter, Turn turn, String code, boolean retryable) {
         try {
+            String message = "TURN_TIMEOUT".equals(code)
+                    ? "Истекло время ожидания модели. Можно повторить запрос."
+                    : "Не удалось завершить ответ. Можно повторить запрос.";
             send(emitter, "failed", Map.of("turn_id", turn.turnId(), "code", code,
-                    "message", "Не удалось завершить ответ. Можно повторить запрос.", "retryable", retryable));
+                    "message", message, "retryable", retryable));
         } catch (IOException | IllegalStateException ex) {
             log.debug("SSE disconnected request_id={}", turn.requestId());
         }

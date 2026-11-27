@@ -29,7 +29,12 @@ from .schemas import (
     Complete,
     ComposeRequest,
     Error,
+    FaqReview,
+    FaqReviewRequest,
+    FaqReviewResult,
     Health,
+    IntentSignal,
+    Interpretation,
     InterpretRequest,
     InterpretResult,
     ModelRequest,
@@ -79,14 +84,16 @@ router = APIRouter(
 
 
 def model_payload(body: ModelRequest, provider: RunpodClient) -> str:
-    payload = body.model_dump_json(by_alias=True, exclude={"request_id", "deadline_ms"})
+    payload = body.model_dump_json(
+        by_alias=True, exclude={"request_id", "deadline_ms", "candidate_id"}
+    )
     if len(payload.encode("utf-8")) > provider.settings.ml_max_context_bytes:
         raise ServiceError("CONTEXT_TOO_LARGE", "Контекст запроса слишком большой.", 400)
     return payload
 
 
-def make_deadline(deadline_ms: int) -> float:
-    return asyncio.get_running_loop().time() + min(deadline_ms, MAX_DEADLINE_MS) / 1_000
+def make_deadline(deadline_ms: int, maximum_ms: int = MAX_DEADLINE_MS) -> float:
+    return asyncio.get_running_loop().time() + min(deadline_ms, maximum_ms) / 1_000
 
 
 @router.post(
@@ -106,10 +113,17 @@ def make_deadline(deadline_ms: int) -> float:
 async def interpret(
     body: InterpretRequest, provider: Runpod, response: Response
 ) -> InterpretResult:
-    deadline = make_deadline(body.deadline_ms)
+    deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
+    prompt_version = provider.settings.ml_interpret_prompt_version
     with provider.call("interpret", body.request_id) as call:
-        interpretation = await provider.interpret(
-            prompts.INTERPRET, model_payload(body, provider), call, deadline
+        interpretation = await provider.complete(
+            prompts.INTERPRET_PROMPTS[prompt_version],
+            model_payload(body, provider),
+            call,
+            deadline,
+            schema=Interpretation,
+            schema_name="interpretation",
+            max_tokens=768,
         )
         updates: list[ClearUpdate | SetOperation] = []
         for update in interpretation.updates:
@@ -119,15 +133,64 @@ async def interpret(
                 updates.append(ClearUpdate(op="clear", field=update.field))
             else:
                 updates.append(update)
+        signals: dict[str, IntentSignal] = {}
+        for signal in interpretation.signals:
+            if signal.evidence in body.text:
+                signals.setdefault(signal.kind, signal)
         call.succeeded = True
-    response.headers["X-Prompt-Version"] = prompts.INTERPRET_VERSION
+    response.headers["X-Prompt-Version"] = prompt_version
     return InterpretResult(
         intent=interpretation.intent,
         product_query=interpretation.product_query,
         updates=updates,
         clarification_candidates=interpretation.clarification_candidates,
         model_version=provider.model_version,
+        signals=list(signals.values()),
     )
+
+
+@router.post("/faq/review", operation_id="reviewFaq")
+async def review_faq(body: FaqReviewRequest, provider: Runpod) -> FaqReviewResult:
+    started = perf_counter()
+    deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
+    verdict = None
+    reason = "cancelled"
+    try:
+        with provider.call("faq_review", body.request_id) as call:
+            review = await provider.complete(
+                prompts.FAQ_REVIEW,
+                model_payload(body, provider),
+                call,
+                deadline,
+                schema=FaqReview,
+                schema_name="faq_review",
+                max_tokens=2_048,
+            )
+            allowed_sources = {source.id for source in body.sources}
+            if not allowed_sources.issuperset(review.source_ids):
+                raise InvalidModelOutput("invalid_faq_source_references")
+            try:
+                result = FaqReviewResult(
+                    **review.model_dump(),
+                    prompt_version=prompts.FAQ_REVIEW_VERSION,
+                    model_version=call.model_version,
+                )
+            except ValidationError:
+                raise ServiceError("ML_NOT_CONFIGURED", "Некорректная версия модели.") from None
+            call.succeeded = True
+        verdict, reason = result.verdict, result.reason_code
+        return result
+    except ServiceError as error:
+        reason = error.code
+        raise
+    finally:
+        logger.info(
+            "FAQ review candidate_id=%s verdict=%s reason=%s elapsed_ms=%.0f",
+            body.candidate_id,
+            verdict,
+            reason,
+            (perf_counter() - started) * 1_000,
+        )
 
 
 def parse_block(line: str, fact_ids: set[str], facts_required: bool) -> Block:
@@ -162,7 +225,7 @@ class Composition:
 async def open_composition(
     body: ComposeRequest, provider: Runpod
 ) -> AsyncGenerator[Composition, None]:
-    deadline = make_deadline(body.deadline_ms)
+    deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
     payload = model_payload(body, provider)
     with provider.call("compose", body.request_id) as call:
         chunks = provider.stream(prompts.COMPOSE, payload, call, deadline)
@@ -291,10 +354,12 @@ def create_app(
                 yield
                 return
 
+            base_url = f"https://api.runpod.ai/v2/{config.runpod_endpoint_id}/"
+            using_queue = config.runpod_request_mode == "queue"
             async with httpx.AsyncClient(
-                base_url=f"https://api.runpod.ai/v2/{config.runpod_endpoint_id}/openai/v1/",
+                base_url=base_url if using_queue else base_url + "openai/v1/",
                 headers={"Authorization": f"Bearer {config.runpod_api_key.get_secret_value()}"},
-                timeout=httpx.Timeout(MAX_DEADLINE_MS / 1_000, connect=5.0),
+                timeout=httpx.Timeout(8.0 if using_queue else MAX_DEADLINE_MS / 1_000, connect=5.0),
                 limits=httpx.Limits(max_connections=config.runpod_max_concurrency),
                 transport=runpod_transport,
             ) as client:

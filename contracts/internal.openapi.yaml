@@ -62,6 +62,24 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }
+  /internal/v1/faq/review:
+    post:
+      operationId: reviewFaq
+      summary: Проверить обезличенный ответ менеджера по переданным выдержкам
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaqReviewRequest' }
+      responses:
+        '200':
+          description: Результат проверки, пригодность которого для публикации отдельно проверяет Java
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaqReviewResult' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /health/live:
     get:
       operationId: mlLiveness
@@ -82,7 +100,7 @@ components:
       scheme: bearer
   responses:
     Error:
-      description: Внутренняя ошибка до открытия SSE
+      description: Ошибка внутреннего API
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -100,7 +118,55 @@ components:
     DeadlineMs:
       type: integer
       minimum: 1
-      description: Остаток дедлайна хода. Лимит FastAPI составляет 180 000 мс и включает очередь и холодный запуск.
+      description: Остаток дедлайна хода. Лимит FastAPI включает очередь и холодный запуск. Для прямого OpenAI-маршрута он составляет 180 000 мс, для режима очереди Runpod — 1 200 000 мс.
+    FaqReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, candidate_id, deadline_ms, question, answer, sources]
+      properties:
+        request_id: { $ref: '#/components/schemas/RequestId' }
+        candidate_id: { type: string, format: uuid }
+        deadline_ms: { $ref: '#/components/schemas/DeadlineMs' }
+        question: { type: string, minLength: 1, maxLength: 500, pattern: '\S' }
+        answer: { type: string, minLength: 1, maxLength: 2000, pattern: '\S' }
+        sources:
+          type: array
+          maxItems: 3
+          description: Выдержки с уникальными ID. Пустой список допустим при отсутствии подтверждения в справке.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, text]
+            properties:
+              id: { type: string, format: uuid }
+              text: { type: string, minLength: 1, maxLength: 1500, pattern: '\S' }
+    FaqReviewResult:
+      type: object
+      additionalProperties: false
+      required: [verdict, reason_code, question, answer, source_ids, prompt_version, model_version]
+      properties:
+        verdict: { enum: [publish, needs_review, case_specific] }
+        reason_code: { enum: [supported, insufficient_evidence, incomplete_answer, case_specific, unsafe_content] }
+        question: { type: [string, 'null'], maxLength: 500 }
+        answer: { type: [string, 'null'], maxLength: 2000 }
+        source_ids:
+          type: array
+          description: ID подтверждающих выдержек из текущего запроса.
+          uniqueItems: true
+          maxItems: 3
+          items: { type: string, format: uuid }
+        prompt_version: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
+        model_version: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
+      allOf:
+        - if:
+            properties:
+              verdict: { const: publish }
+          then:
+            properties:
+              reason_code: { const: supported }
+              question: { type: string, minLength: 1, pattern: '\S' }
+              answer: { type: string, minLength: 1, pattern: '\S' }
+              source_ids: { minItems: 1 }
     PositiveInt: { type: integer, minimum: 1 }
     Budget: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
     LicenseKind: { enum: [new, renewal] }
@@ -143,10 +209,23 @@ components:
               role: { enum: [user, assistant] }
               text: { type: string, maxLength: 4000 }
         requirements: { $ref: '#/components/schemas/Requirements' }
+    IntentSignal:
+      type: object
+      additionalProperties: false
+      required: [kind, evidence]
+      properties:
+        kind: { enum: [key_delivery, key_activation, refund, instruction_failed, price_objection, payment_deferral] }
+        evidence: { type: string, minLength: 1, maxLength: 240, pattern: '\S', description: Дословный фрагмент текущей реплики }
     InterpretResult:
       type: object
       required: [intent, product_query, updates, clarification_candidates, model_version]
       properties:
+        signals:
+          type: array
+          maxItems: 6
+          default: []
+          description: Сигналы текущей реплики с одной дословной цитатой для каждого типа. История уточняет предмет реплики. Сигналы описывают реплику без решения о скидке или передаче менеджеру.
+          items: { $ref: '#/components/schemas/IntentSignal' }
         intent: { enum: [known_product, needs_solution, product_question] }
         product_query:
           type: [string, 'null']
@@ -206,7 +285,7 @@ components:
         facts:
           type: array
           maxItems: 16
-          description: Подтверждённые факты с уникальными идентификаторами.
+          description: Подтверждённые Java факты с уникальными идентификаторами, включая выдержки из справки и согласованные цену, скидку и итог. Суммы и валюту модель воспроизводит из фактов без вычислений. Ссылки и карточки формирует Java.
           items:
             type: object
             required: [id, text]

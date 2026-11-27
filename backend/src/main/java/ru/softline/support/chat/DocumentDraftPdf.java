@@ -21,15 +21,15 @@ class DocumentDraftPdf {
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM.uuuu");
     private static final ZoneId MOSCOW = ZoneId.of("Europe/Moscow");
 
-    byte[] render(DocumentDraft draft, DraftKind kind, UUID quoteId) throws IOException {
+    byte[] render(DocumentDraft draft, DraftKind kind, UUID quoteId, String invoiceNumber) throws IOException {
         try (PDDocument document = new PDDocument();
              InputStream fontFile = DocumentDraftPdf.class.getResourceAsStream("/fonts/DejaVuSans.ttf")) {
             if (fontFile == null) throw new IOException("Document font unavailable");
             PDType0Font font = PDType0Font.load(document, fontFile);
-            document.getDocumentInformation().setTitle(kind.title);
+            document.getDocumentInformation().setTitle(invoiceNumber == null ? kind.title : InvoicePdf.PAYMENT_TITLE);
             String date = LocalDate.now(MOSCOW).format(DATE);
             if (kind == DraftKind.QUOTE) CommercialProposalPdf.write(document, font, draft, quoteId, date);
-            else InvoicePdf.write(document, font, draft, quoteId, date);
+            else InvoicePdf.write(document, font, draft, quoteId, date, invoiceNumber);
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             document.save(output);
             return output.toByteArray();

@@ -2,6 +2,9 @@ package ru.softline.support.chat;
 
 import static ru.softline.support.chat.ChatTypes.*;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
@@ -10,15 +13,21 @@ import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import ru.softline.support.chat.FaqStore.FaqApproval;
+import ru.softline.support.chat.FaqStore.FaqView;
 
 @Service
 class ManagerStore {
     private final JdbcClient db;
     private final ChatStore chat;
+    private final FaqStore faq;
+    private final ObjectMapper json;
 
-    ManagerStore(JdbcClient db, ChatStore chat) {
+    ManagerStore(JdbcClient db, ChatStore chat, FaqStore faq, ObjectMapper json) {
         this.db = db;
         this.chat = chat;
+        this.faq = faq;
+        this.json = json;
     }
 
     List<QueueItem> list(String manager, int limit, int offset) {
@@ -31,7 +40,8 @@ class ManagerStore {
     @Transactional
     public AssignedHandoff read(UUID id, String manager) {
         Assigned assigned = lockAssigned(id, manager);
-        return new AssignedHandoff(assigned.item(), chat.messages(assigned.item().sessionId(), assigned.throughOrdinal()));
+        return new AssignedHandoff(assigned.item(), chat.messages(assigned.item().sessionId(), assigned.throughOrdinal()),
+                assigned.salesContext());
     }
 
     @Transactional
@@ -69,11 +79,43 @@ class ManagerStore {
         if ("resolved".equals(assigned.status())) return assigned;
         chat.expire(assigned.sessionId());
         chat.requireIdle(assigned.sessionId());
-        return db.sql("""
+        QueueItem resolved = db.sql("""
             UPDATE chat_handoffs h SET status = 'resolved', resolved_at = clock_timestamp(), closed_at_ordinal = (
                 SELECT COALESCE(max(ordinal), 0) FROM chat_messages WHERE session_id = h.session_id
             ) WHERE h.handoff_id = ? RETURNING h.*
             """).param(id).query(ManagerStore::item).single();
+        faq.enqueue(id);
+        return resolved;
+    }
+
+    @Transactional
+    public FaqView readFaq(UUID id, String manager, String query) {
+        requireResolved(id, manager);
+        return faq.read(id, query);
+    }
+
+    @Transactional
+    public FaqView approveFaq(UUID id, String manager, FaqApproval approval) {
+        requireResolved(id, manager);
+        return faq.approve(id, manager, approval);
+    }
+
+    @Transactional
+    public FaqView rejectFaq(UUID id, String manager) {
+        requireResolved(id, manager);
+        return faq.reject(id, manager);
+    }
+
+    @Transactional
+    public FaqView unpublishFaq(UUID id, String manager) {
+        requireResolved(id, manager);
+        return faq.unpublish(id, manager);
+    }
+
+    private void requireResolved(UUID id, String manager) {
+        if (!"resolved".equals(lockAssigned(id, manager).item().status())) {
+            throw new ChatError(404, "FAQ_NOT_FOUND", "Проверка FAQ доступна для закрытого обращения.");
+        }
     }
 
     private Assigned lockAssigned(UUID id, String manager) {
@@ -83,7 +125,8 @@ class ManagerStore {
         return db.sql("SELECT * FROM chat_handoffs WHERE handoff_id = ? AND manager_id = ?")
                 .params(id, manager).query((rs, row) -> {
                     Long closedAt = rs.getObject("closed_at_ordinal", Long.class);
-                    return new Assigned(item(rs, row), closedAt == null ? Long.MAX_VALUE : closedAt);
+                    return new Assigned(item(rs, row), closedAt == null ? Long.MAX_VALUE : closedAt,
+                            salesContext(rs.getString("sales_context")));
                 }).optional().orElseThrow(ManagerStore::missing);
     }
 
@@ -111,6 +154,15 @@ class ManagerStore {
                 rs.getString("reason"), rs.getString("status"), rs.getObject("created_at", OffsetDateTime.class).toInstant());
     }
 
+    private JsonNode salesContext(String value) {
+        if (value == null) return null;
+        try {
+            return json.readTree(value);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Invalid saved sales context", e);
+        }
+    }
+
     private record Assignment(QueueItem item, String manager) {}
-    private record Assigned(QueueItem item, long throughOrdinal) {}
+    private record Assigned(QueueItem item, long throughOrdinal, JsonNode salesContext) {}
 }

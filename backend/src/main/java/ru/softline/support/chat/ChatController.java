@@ -123,7 +123,14 @@ class ChatController {
                                         HttpServletRequest request,
                                         @CookieValue(value = COOKIE, required = false) String token) throws IOException {
         requireDocumentRequest(id, request);
-        return download(DraftKind.INVOICE).body(store.issueInvoice(id, token, input));
+        IssuedInvoice invoice = store.issueInvoice(id, token, input);
+        ResponseEntity.BodyBuilder response = download(DraftKind.INVOICE);
+        if (invoice.number() == null) {
+            response.header("X-Invoice-Purpose", "agreement");
+        } else {
+            response.header("X-Invoice-Purpose", "test_payment").header("X-Invoice-Number", invoice.number());
+        }
+        return response.body(invoice.bytes());
     }
 
     private void requireDocumentRequest(UUID id, HttpServletRequest request) {

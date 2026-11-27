@@ -64,6 +64,11 @@ paths:
                 required: [handoff, messages]
                 properties:
                   handoff: { $ref: '#/components/schemas/QueueItem' }
+                  sales_context:
+                    description: Снимок выбранной позиции и версии КП на момент передачи просьбы об отсрочке.
+                    oneOf:
+                      - $ref: '#/components/schemas/SalesContext'
+                      - type: 'null'
                   messages:
                     type: array
                     items: { $ref: '#/components/schemas/ChatMessage' }
@@ -117,6 +122,63 @@ paths:
         '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
         '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
         '409': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}/faq:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    get:
+      operationId: readHandoffFaq
+      description: Возвращает результат проверки для своего закрытого обращения. Если кандидата нет, возвращает candidate=null.
+      parameters:
+        - name: source_query
+          in: query
+          description: Поиск свежих выдержек справки для ручной проверки
+          schema: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        '200': { $ref: '#/components/responses/FaqReview' }
+        '400': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}/faq/approve:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    post:
+      operationId: approveHandoffFaq
+      description: Публикует исправленный общий ответ из needs_review со свежим источником из справки. Повтор с теми же данными возвращает опубликованную запись. FAQ_SOURCE_UNAVAILABLE означает, что требуется свежий источник, FAQ_DUPLICATE — что вопрос уже опубликован с той же областью применимости.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaqApproval' }
+      responses:
+        '200': { $ref: '#/components/responses/FaqReview' }
+        '400': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '409': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}/faq/reject:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    post:
+      operationId: rejectHandoffFaq
+      description: Отклоняет кандидата, ожидающего ручной проверки.
+      responses:
+        '200': { $ref: '#/components/responses/FaqReview' }
+        '400': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '409': { $ref: './public.openapi.yaml#/components/responses/Error' }
+  /api/v1/manager/handoffs/{handoff_id}/faq/unpublish:
+    parameters:
+      - $ref: '#/components/parameters/HandoffId'
+    post:
+      operationId: unpublishHandoffFaq
+      description: Снимает опубликованный FAQ с поиска. Сохраняет связь с обращением.
+      responses:
+        '200': { $ref: '#/components/responses/FaqReview' }
+        '400': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '401': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '404': { $ref: './public.openapi.yaml#/components/responses/Error' }
+        '409': { $ref: './public.openapi.yaml#/components/responses/Error' }
 components:
   securitySchemes:
     managerToken: { type: http, scheme: bearer }
@@ -140,7 +202,7 @@ components:
       required: [handoff_id, reason, status, created_at]
       properties:
         handoff_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
-        reason: { enum: [document_review, off_catalog_order] }
+        reason: { enum: [document_review, off_catalog_order, instruction_failed, payment_deferral] }
         status: { enum: [queued, in_progress, resolved] }
         created_at: { type: string, format: date-time }
     QueueItem:
@@ -150,9 +212,76 @@ components:
           required: [session_id]
           properties:
             session_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+    SalesContext:
+      type: object
+      required: [offer, quote]
+      properties:
+        offer:
+          oneOf:
+            - $ref: './public.openapi.yaml#/components/schemas/OfferCard'
+            - type: 'null'
+        quote:
+          oneOf:
+            - type: object
+              required: [quote_id, quantity, approved]
+              properties:
+                quote_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+                quantity: { type: integer, minimum: 1 }
+                approved: { type: boolean }
+                discount_percent: { type: string }
+                agreed_total: { type: [string, 'null'] }
+                price:
+                  oneOf:
+                    - $ref: './public.openapi.yaml#/components/schemas/Price'
+                    - type: 'null'
+            - type: 'null'
+    FaqApproval:
+      type: object
+      required: [question, answer, source_id]
+      properties:
+        question: { type: string, minLength: 1, maxLength: 500 }
+        answer: { type: string, minLength: 1, maxLength: 2000 }
+        source_id: { type: string, format: uuid }
+        product: { type: string, minLength: 1, maxLength: 120 }
+        edition: { type: string, minLength: 1, maxLength: 120, description: Допустима вместе с продуктом }
+    FaqCandidate:
+      type: object
+      required: [candidate_id, status, attempts, sources]
+      properties:
+        candidate_id: { type: string, format: uuid }
+        status: { enum: [queued, published, needs_review, case_specific, rejected, unpublished] }
+        reason_code: { type: [string, 'null'] }
+        attempts: { type: integer, minimum: 0 }
+        question: { type: [string, 'null'] }
+        answer: { type: [string, 'null'] }
+        product: { type: [string, 'null'] }
+        edition: { type: [string, 'null'] }
+        source_id: { type: [string, 'null'], format: uuid }
+        sources:
+          type: array
+          items:
+            type: object
+            required: [id, title, url, text]
+            properties:
+              id: { type: string, format: uuid }
+              title: { type: string }
+              url: { type: string, format: uri }
+              text: { type: string }
   responses:
     QueueItem:
       description: Состояние обращения
       content:
         application/json:
           schema: { $ref: '#/components/schemas/QueueItem' }
+    FaqReview:
+      description: Состояние кандидата и текущие выдержки справки
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [candidate]
+            properties:
+              candidate:
+                oneOf:
+                  - $ref: '#/components/schemas/FaqCandidate'
+                  - type: 'null'
