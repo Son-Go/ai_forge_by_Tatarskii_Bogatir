@@ -90,8 +90,12 @@ async def evaluate() -> int:
                 },
             )
             if response.status_code != 200:
-                print(f"FAIL {label}: HTTP {response.status_code} {response.json().get('code')}")
-                return 1
+                code = response.json().get("code")
+                print(f"FAIL {label}: HTTP {response.status_code} {code}")
+                if code != "MODEL_INVALID_OUTPUT":
+                    return 1
+                failures += 1
+                continue
             signals = response.json()["signals"]
             actual = {signal["kind"] for signal in signals}
             passed = actual == expected and all(s["evidence"] in utterance for s in signals)

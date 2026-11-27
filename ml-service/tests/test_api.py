@@ -371,7 +371,7 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
     async with client_for(settings, handler) as client:
         response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
     assert response.status_code == 200
-    assert response.headers["X-Prompt-Version"] == "interpret-4"
+    assert response.headers["X-Prompt-Version"] == "interpret-5"
     assert response.json() == RESULT | {"model_version": "release-a", "signals": []}
 
 
