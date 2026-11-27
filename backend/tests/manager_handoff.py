@@ -13,7 +13,15 @@ QUEUE = "/api/v1/manager/handoffs"
 SESSIONS = "/api/v1/sessions"
 
 
-def run(origin, managers):
+def accepted_messages(metrics_url):
+    with urlopen(metrics_url, timeout=10) as response:
+        for line in response.read().decode().splitlines():
+            if line.startswith("chat_user_messages_accepted_total "):
+                return float(line.split()[1])
+    raise AssertionError("Missing chat_user_messages_accepted_total")
+
+
+def run(origin, managers, metrics_url=None):
     def call(path, *, method="GET", body=None, cookie=None, token=None, expected=200):
         headers = {"Origin": origin}
         if cookie:
@@ -57,10 +65,16 @@ def run(origin, managers):
     assert call(QUEUE, cookie=cookie, expected=401)[1]["code"] == "MANAGER_AUTH_REQUIRED"
     document = "Пожалуйста, проверьте наши документы по заказу."
     client_message = str(uuid4())
+    if metrics_url:
+        before = accepted_messages(metrics_url)
     assert "event:status" not in send(path, cookie, document, client_message)
+    if metrics_url:
+        assert accepted_messages(metrics_url) == before + 1
     queued = handoff(path, cookie)
     assert queued["reason"] == "document_review" and queued["status"] == "queued"
     send(path, cookie, document, client_message)
+    if metrics_url:
+        assert accepted_messages(metrics_url) == before + 1
     assert handoff(path, cookie) == queued
     case = QUEUE + "/" + queued["handoff_id"]
     for token in managers:
@@ -112,16 +126,20 @@ def run(origin, managers):
     assert new_case["handoff_id"] != queued["handoff_id"]
     archived = call(case, token=manager)[1]["messages"]
     assert archived[-1] == first
+    if metrics_url:
+        assert accepted_messages(metrics_url) == before + 3
+        print("PASS: new messages without model calls counted once, including saved-turn replay")
     print("PASS: permissions, concurrent claim, client follow-up, manager reply/retry, resolve, and off-catalog order")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", required=True, help="Use a disposable backend on loopback with an active test catalog")
+    parser.add_argument("--metrics-url", help="Verify the accepted-message counter at the private Prometheus endpoint")
     args = parser.parse_args()
     if not args.origin.startswith(("http://127.0.0.1:", "http://localhost:")):
         parser.error("This check requires a loopback backend")
     managers = [entry.split("=", 1)[-1] for entry in os.environ.get("MANAGER_ACCESS_TOKENS", "").split(",")]
     if len(managers) != 2 or not all(managers):
         parser.error("Configure exactly two test managers in MANAGER_ACCESS_TOKENS")
-    run(args.origin, managers)
+    run(args.origin, managers, args.metrics_url)

@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, StringConstraints, field_validator
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_ignore_empty=True, hide_input_in_errors=True)
 
     ml_service_token: SecretStr | None = None
+    ml_usage_log_file: Path | None = None
     runpod_api_key: SecretStr | None = None
     runpod_endpoint_id: EndpointId | None = None
     runpod_model: SettingText | None = None
