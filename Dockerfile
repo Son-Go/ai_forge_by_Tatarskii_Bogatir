@@ -24,6 +24,7 @@ WORKDIR /srv/ml-service
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY --from=ml-build /srv/ml-service/.venv .venv
 COPY ml-service/app/ ./app/
+RUN install -d -o 10001 -g 10001 /var/log/ml-service
 USER 10001:10001
 EXPOSE 8000
 CMD [".venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
