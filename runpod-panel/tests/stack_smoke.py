@@ -60,6 +60,11 @@ def check_chat():
     assert events[0][0] == "accepted" and events[-1][0] == "done", events
     assert events[-1][1]["outcome"] == "recommend", events
     assert any(kind == "delta" and "DemoMail" in json.dumps(data) for kind, data in events), events
+    completed = events[-1][1]["message"]
+    history, _, _ = fetch(f"{base}/{session_id}", headers=headers)
+    restored = json.loads(history)["messages"][-1]
+    for field in ("text", "cards", "sources"):
+        assert restored[field] == completed[field], (field, restored, completed)
     return events[0][1]["request_id"]
 
 
@@ -87,7 +92,7 @@ def check_grafana(request_id):
         == "runpod-token-usage"
     )
 
-    # The dashboard's Loki datasource sees both verified model calls for this request.
+    # A standard recommendation uses only the interpretation call.
     url = GRAFANA + "/api/datasources/proxy/uid/loki/loki/api/v1/query_range?"
     query = '{service="ml-service"} | json | request_id="' + request_id + '"'
     deadline = monotonic() + 40
@@ -98,11 +103,12 @@ def check_grafana(request_id):
         entries = json.loads(body)["data"]["result"]
         rows = [json.loads(value) for stream in entries for _, value in stream["values"]]
         if rows:
-            stages = {row["stage"] for row in rows if row["usage_status"] == "reported"}
-            if stages == {"interpret", "compose"}:
-                return
+            assert [(row["stage"], row["status"], row["usage_status"]) for row in rows] == [
+                ("interpret", "ok", "reported")
+            ], rows
+            return
         sleep(2)
-    raise AssertionError("Grafana Loki datasource did not report both ML calls")
+    raise AssertionError("Grafana Loki datasource did not report the interpretation call")
 
 
 def main():

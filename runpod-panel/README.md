@@ -106,7 +106,7 @@ python3 runpod-panel/tests/stack_smoke.py off
 stack_test down
 ```
 
-Укажите `PANEL_CHROME_BIN`, если используете установленный Google Chrome вместо Chromium Playwright. `PANEL_SCREENSHOTS` задаёт каталог снимков проверки. Чат проверяется с синтетическим XML-каталогом через действующие Caddy, Spring Boot и ML-сервис. Подменены только ответы Runpod. Grafana через Loki проверяется по `request_id` для этапов интерпретации и композиции.
+Укажите `PANEL_CHROME_BIN`, если используете установленный Google Chrome вместо Chromium Playwright. `PANEL_SCREENSHOTS` задаёт каталог снимков проверки. Чат проверяется с синтетическим XML-каталогом через действующие Caddy, Spring Boot и ML-сервис. Подменены только ответы Runpod. Для типовой рекомендации Grafana через Loki находит один вызов интерпретации по `request_id`.
 
 ## Приёмка перед выкладкой
 
