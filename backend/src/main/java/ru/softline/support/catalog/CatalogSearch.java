@@ -8,6 +8,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -20,6 +21,12 @@ public class CatalogSearch {
         SELECT o.*, i.snapshot_at, i.activated_at, c.name AS category_name
         FROM catalog_offers o JOIN catalog_imports i USING (import_id)
         LEFT JOIN catalog_categories c USING (import_id, category_id)
+        """;
+    private static final String LATEST_KNOWLEDGE = """
+        SELECT c.chunk_id, c.body, d.title, d.source_url, d.fetched_at
+        FROM knowledge_chunks c JOIN knowledge_documents d USING (document_id)
+        WHERE NOT EXISTS (SELECT 1 FROM knowledge_documents newer WHERE newer.source_url = d.source_url
+            AND (newer.fetched_at, newer.document_id) > (d.fetched_at, d.document_id))
         """;
     private final JdbcClient db;
     private final ObjectMapper json;
@@ -62,17 +69,28 @@ public class CatalogSearch {
 
     public List<Knowledge> knowledge(String query) {
         if (query == null || query.isBlank()) return List.of();
-        return db.sql("""
-            SELECT c.chunk_id, c.body, d.title, d.source_url, d.fetched_at
-            FROM knowledge_chunks c JOIN knowledge_documents d USING (document_id)
-            WHERE to_tsvector('russian', c.body) @@ websearch_to_tsquery('russian', ?)
-                AND NOT EXISTS (SELECT 1 FROM knowledge_documents newer WHERE newer.source_url = d.source_url
-                    AND (newer.fetched_at, newer.document_id) > (d.fetched_at, d.document_id))
+        return db.sql(LATEST_KNOWLEDGE + """
+            AND to_tsvector('russian', c.body) @@ websearch_to_tsquery('russian', ?)
             ORDER BY ts_rank(to_tsvector('russian', c.body), websearch_to_tsquery('russian', ?)) DESC,
                 c.chunk_id LIMIT 3
-            """).params(query, query).query((rs, n) -> new Knowledge(rs.getObject("chunk_id", UUID.class),
-                rs.getString("body"), rs.getString("title"), rs.getString("source_url"),
-                rs.getObject("fetched_at", OffsetDateTime.class).toInstant())).list();
+            """).params(query, query).query(CatalogSearch::knowledgeRow).list();
+    }
+
+    public List<Knowledge> faqKnowledge(String query) {
+        String words = query.replaceAll("[^\\p{L}\\p{N}]+", " ").strip();
+        if (words.isEmpty()) return List.of();
+        return knowledge(String.join(" OR ", words.split(" ")));
+    }
+
+    public List<Knowledge> currentKnowledge(Collection<UUID> ids) {
+        if (ids.isEmpty()) return List.of();
+        return db.sql(LATEST_KNOWLEDGE + " AND c.chunk_id IN (:ids)")
+                .param("ids", ids).query(CatalogSearch::knowledgeRow).list();
+    }
+
+    private static Knowledge knowledgeRow(ResultSet rs, int row) throws SQLException {
+        return new Knowledge(rs.getObject("chunk_id", UUID.class), rs.getString("body"), rs.getString("title"),
+                rs.getString("source_url"), rs.getObject("fetched_at", OffsetDateTime.class).toInstant());
     }
 
     public JsonNode card(Offer offer) {

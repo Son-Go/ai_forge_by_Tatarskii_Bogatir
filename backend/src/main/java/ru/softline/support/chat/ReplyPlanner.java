@@ -28,9 +28,11 @@ class ReplyPlanner {
             "domestic_required", "Нужна ли запись в реестре российского ПО?",
             "use_case", "Какую задачу должно решать ПО?");
     private final CatalogSearch catalog;
+    private final FaqStore faq;
 
-    ReplyPlanner(CatalogSearch catalog) {
+    ReplyPlanner(CatalogSearch catalog, FaqStore faq) {
         this.catalog = catalog;
+        this.faq = faq;
     }
 
     Map<String, Object> apply(Map<String, Object> old, MlClient.Interpretation input, String text) {
@@ -69,8 +71,22 @@ class ReplyPlanner {
         }
         if (text.contains("под заказ") || text.contains("вне каталога") || text.contains("вне витрины")
                 || text.contains("нет в каталоге") || text.contains("нет на сайте")
-                || text.contains("не нашел на сайте") || text.contains("не нашла на сайте")) return offCatalog();
+                || text.contains("не нашел на сайте") || text.contains("не нашла на сайте")
+                || text.contains("проверьте возможность поставки") || text.contains("уточните возможность поставки")
+                || text.contains("проверьте поставку")) return offCatalog();
         return null;
+    }
+
+    Reply faqAnswer(Turn turn, MlClient.Interpretation interpretation, Map<String, Object> requirements) {
+        if (!"product_question".equals(interpretation.intent())) return null;
+        String key = FaqText.key(turn.userText());
+        return faq.lookup(turn.userText(), explicitValue(key, requirements.get("product_name")),
+                explicitValue(key, requirements.get("edition")));
+    }
+
+    private static String explicitValue(String questionKey, Object value) {
+        String text = query(value);
+        return text != null && FaqText.contains(questionKey, FaqText.key(text)) ? text : null;
     }
 
     Reply plan(Turn turn, MlClient.Interpretation input, Map<String, Object> requirements) {

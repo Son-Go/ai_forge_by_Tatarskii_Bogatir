@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -16,11 +17,19 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -108,6 +117,93 @@ class MlClient {
         }
     }
 
+    FaqReview reviewFaq(UUID candidate, String question, String answer, List<FaqExcerpt> sources, int deadlineMs)
+            throws IOException, InterruptedException {
+        if (base == null) throw new IOException("ML endpoint not configured");
+        var request = HttpRequest.newBuilder(base.resolve("/internal/v1/faq/review"))
+                .timeout(Duration.ofMillis(deadlineMs)).header("Authorization", "Bearer " + token)
+                .header("Accept", "application/json").header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(boundedPayload(json.valueToTree(Map.of(
+                        "request_id", UUID.randomUUID(), "candidate_id", candidate, "deadline_ms", deadlineMs,
+                        "question", question, "answer", answer, "sources", sources))))).build();
+        var pending = http.sendAsync(request, ignored -> new BoundedJson());
+        HttpResponse<byte[]> response;
+        try {
+            response = pending.get(deadlineMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException ex) {
+            throw new HttpTimeoutException("FAQ review deadline expired");
+        } catch (ExecutionException ex) {
+            throw new IOException("FAQ review call failed", ex);
+        } finally {
+            pending.cancel(true);
+        }
+        verify(response, "application/json");
+        JsonNode result = json.readTree(response.body());
+        Set<String> keys = Set.of("verdict", "reason_code", "question", "answer", "source_ids",
+                "prompt_version", "model_version");
+        if (result == null || !result.isObject() || result.size() != keys.size()
+                || keys.stream().anyMatch(key -> !result.has(key))
+                || !boundedText(result.get("question"), 500, true)
+                || !boundedText(result.get("answer"), 2000, true)
+                || !result.path("source_ids").isArray() || result.path("source_ids").size() > 3
+                || !boundedText(result.get("prompt_version"), 128, false)
+                || !boundedText(result.get("model_version"), 128, false)) {
+            throw new IOException("Invalid FAQ review result");
+        }
+        try {
+            FaqReview review = json.treeToValue(result, FaqReview.class);
+            if (!List.of("publish", "needs_review", "case_specific").contains(result.path("verdict").asText())
+                    || !List.of("supported", "insufficient_evidence", "incomplete_answer", "case_specific",
+                            "unsafe_content").contains(result.path("reason_code").asText())
+                    || review.sourceIds().stream().anyMatch(java.util.Objects::isNull)
+                    || review.sourceIds().stream().distinct().count() != review.sourceIds().size()
+                    || "publish".equals(review.verdict()) && (!"supported".equals(review.reasonCode())
+                        || review.sourceIds().isEmpty() || !boundedText(result.get("question"), 500, false)
+                        || !boundedText(result.get("answer"), 2000, false))) {
+                throw new IOException("Invalid FAQ review result");
+            }
+            return review;
+        } catch (IllegalArgumentException ex) {
+            throw new IOException("Invalid FAQ review result", ex);
+        }
+    }
+
+    private static boolean boundedText(JsonNode value, int max, boolean nullable) {
+        return nullable && value.isNull() || value.isTextual() && value.textValue().length() <= max
+                && (nullable || !value.textValue().isBlank());
+    }
+
+    private static final class BoundedJson implements HttpResponse.BodySubscriber<byte[]> {
+        private final CompletableFuture<byte[]> result = new CompletableFuture<>();
+        private final ByteArrayOutputStream body = new ByteArrayOutputStream();
+        private Flow.Subscription subscription;
+
+        @Override public CompletableFuture<byte[]> getBody() { return result; }
+
+        @Override public void onSubscribe(Flow.Subscription value) {
+            subscription = value;
+            value.request(1);
+        }
+
+        @Override public void onNext(List<ByteBuffer> data) {
+            for (ByteBuffer buffer : data) {
+                if (buffer.remaining() > MAX_JSON - body.size()) {
+                    subscription.cancel();
+                    result.completeExceptionally(new IOException("Invalid ML body size"));
+                    return;
+                }
+                byte[] bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
+                body.writeBytes(bytes);
+            }
+            subscription.request(1);
+        }
+
+        @Override public void onError(Throwable error) { result.completeExceptionally(error); }
+
+        @Override public void onComplete() { result.complete(body.toByteArray()); }
+    }
+
     private HttpResponse<InputStream> call(Turn turn, String path, String accept, Map<String, ?> fields)
             throws IOException, InterruptedException {
         if (base == null) throw new IOException("ML endpoint not configured");
@@ -170,4 +266,7 @@ class MlClient {
     record Interpretation(String intent, String productQuery, List<Update> updates,
                           List<String> clarificationCandidates, String modelVersion) {}
     record Update(String op, String field, JsonNode value, String evidence) {}
+    record FaqExcerpt(UUID id, String text) {}
+    record FaqReview(String verdict, String reasonCode, String question, String answer, List<UUID> sourceIds,
+                     String promptVersion, String modelVersion) {}
 }

@@ -37,6 +37,11 @@ chat:
   quotes-enabled: ${CHAT_QUOTES_ENABLED:false}
   invoice-drafts-enabled: ${CHAT_INVOICE_DRAFTS_ENABLED:false}
 
+faq:
+  review-enabled: ${FAQ_REVIEW_ENABLED:false}
+  review-timeout-ms: ${FAQ_REVIEW_TIMEOUT_MS:30000}
+  poll-ms: ${FAQ_REVIEW_POLL_MS:5000}
+
 ml:
   base-url: ${ML_BASE_URL:}
   data-region: ${ML_DATA_REGION:}

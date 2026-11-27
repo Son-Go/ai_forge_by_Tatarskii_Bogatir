@@ -47,6 +47,14 @@ python3 backend/tests/sse_timeout.py --jdbc-url jdbc:postgresql://127.0.0.1:5432
 
 Для проверки на пустой тестовой БД запустите Java с активным тестовым каталогом и двумя отдельными менеджерами в `MANAGER_ACCESS_TOKENS`. Передайте ту же переменную сценарию `python3 backend/tests/manager_handoff.py --origin http://127.0.0.1:8080`.
 
+## FAQ из ответов менеджеров
+
+Кандидат создаётся при закрытии обращения с ответом. Состояние доступно через `GET /api/v1/manager/handoffs/{handoff_id}/faq`, в том числе с параметром `source_query` для поиска актуальной выдержки. Действия `approve`, `reject` и `unpublish` принимают тот же менеджерский Bearer-токен. [Контракт кабинета](../contracts/manager.openapi.yaml)
+
+Фоновую проверку включайте через `FAQ_REVIEW_ENABLED=true` после подключения FastAPI с маршрутом `POST /internal/v1/faq/review` в согласованном контуре. Бюджет одного вызова задаётся `FAQ_REVIEW_TIMEOUT_MS` и по умолчанию равен 30 секундам. Java делает до трёх попыток с паузами в одну и две минуты. [Контракт Java ↔ FastAPI](../contracts/internal.openapi.yaml)
+
+Для сквозной проверки соберите JAR и запустите `python3 backend/tests/faq_review.py --compose-file /tmp/faq/compose.yaml`. Используйте отдельный пустой PostgreSQL 17 в сервисе `postgres` с портом `127.0.0.1::5432`, БД и пользователем `faq_check`, тестовым паролем `faq_check_fixture`. Сценарий запускает собственную Java и HTTP-подмену FastAPI.
+
 ## Коммерческое предложение
 
 Для локального запуска включите `CHAT_QUOTES_ENABLED=true` в конфигурации Java или в корневом `.env` для Compose. Владелец сессии выбирает позицию через `selection` и передаёт название организации и количество позиций в `POST /api/v1/sessions/{session_id}/quote-drafts`. Ответ содержит `quote.pdf` на основе шаблона ПАО «Софтлайн» с идентификатором КП и таблицей предложения. Название, артикул, цена и валюта берутся из действующего каталога, итог рассчитывается в Java. При изменении позиции сервер возвращает `OFFER_CHANGED` для повторного подтверждения. Поля НДС, оплаты, поставки и срока действия оставлены менеджеру. [Публичный OpenAPI](../contracts/public.openapi.yaml)

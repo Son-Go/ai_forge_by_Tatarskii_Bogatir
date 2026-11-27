@@ -182,16 +182,18 @@ class ChatFlow {
         long searchStarted = System.nanoTime();
         Map<String, Object> next;
         Reply reply;
+        Reply approvedFaq;
         try {
             next = planner.apply(old, interpretation, turn.userText());
             send(emitter, "status", Map.of("stage", "searching"));
-            reply = planner.plan(turn, interpretation, next);
+            approvedFaq = planner.faqAnswer(turn, interpretation, next);
+            reply = approvedFaq == null ? planner.plan(turn, interpretation, next) : approvedFaq;
         } finally {
             timing.searchMs = elapsedMillis(searchStarted);
         }
         Set<String> sent = new HashSet<>();
         String promptVersion = null;
-        if ("answer".equals(reply.outcome()) || "recommend".equals(reply.outcome())) {
+        if (approvedFaq == null && ("answer".equals(reply.outcome()) || "recommend".equals(reply.outcome()))) {
             send(emitter, "status", Map.of("stage", "generating"));
             try {
                 long compositionStarted = System.nanoTime();

@@ -10,15 +10,19 @@ import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import ru.softline.support.chat.FaqStore.FaqApproval;
+import ru.softline.support.chat.FaqStore.FaqView;
 
 @Service
 class ManagerStore {
     private final JdbcClient db;
     private final ChatStore chat;
+    private final FaqStore faq;
 
-    ManagerStore(JdbcClient db, ChatStore chat) {
+    ManagerStore(JdbcClient db, ChatStore chat, FaqStore faq) {
         this.db = db;
         this.chat = chat;
+        this.faq = faq;
     }
 
     List<QueueItem> list(String manager, int limit, int offset) {
@@ -69,11 +73,43 @@ class ManagerStore {
         if ("resolved".equals(assigned.status())) return assigned;
         chat.expire(assigned.sessionId());
         chat.requireIdle(assigned.sessionId());
-        return db.sql("""
+        QueueItem resolved = db.sql("""
             UPDATE chat_handoffs h SET status = 'resolved', resolved_at = clock_timestamp(), closed_at_ordinal = (
                 SELECT COALESCE(max(ordinal), 0) FROM chat_messages WHERE session_id = h.session_id
             ) WHERE h.handoff_id = ? RETURNING h.*
             """).param(id).query(ManagerStore::item).single();
+        faq.enqueue(id);
+        return resolved;
+    }
+
+    @Transactional
+    public FaqView readFaq(UUID id, String manager, String query) {
+        requireResolved(id, manager);
+        return faq.read(id, query);
+    }
+
+    @Transactional
+    public FaqView approveFaq(UUID id, String manager, FaqApproval approval) {
+        requireResolved(id, manager);
+        return faq.approve(id, manager, approval);
+    }
+
+    @Transactional
+    public FaqView rejectFaq(UUID id, String manager) {
+        requireResolved(id, manager);
+        return faq.reject(id, manager);
+    }
+
+    @Transactional
+    public FaqView unpublishFaq(UUID id, String manager) {
+        requireResolved(id, manager);
+        return faq.unpublish(id, manager);
+    }
+
+    private void requireResolved(UUID id, String manager) {
+        if (!"resolved".equals(lockAssigned(id, manager).item().status())) {
+            throw new ChatError(404, "FAQ_NOT_FOUND", "Проверка FAQ доступна для закрытого обращения.");
+        }
     }
 
     private Assigned lockAssigned(UUID id, String manager) {
