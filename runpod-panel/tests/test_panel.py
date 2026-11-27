@@ -1,0 +1,411 @@
+import json
+from base64 import b64encode
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from panel.config import Config
+from panel.main import create_app
+
+NOW = datetime(2026, 11, 27, 14, tzinfo=UTC)
+AUTH = ("operator", "operator-password-for-local-tests")
+HEADERS = {
+    "x-panel-request": "1",
+    "authorization": "Basic " + b64encode(":".join(AUTH).encode()).decode(),
+}
+
+
+class RunpodMock:
+    def __init__(self):
+        self.now = NOW
+        self.config = {
+            "id": "local-endpoint",
+            "type": "QUEUE",
+            "name": "Support model",
+            "version": 4,
+            "workers": {"min": 0, "max": 1, "idleTimeout": 15, "initTimeout": 600},
+            "scaling": {"type": "QUEUE_DELAY", "queueDelay": 4},
+            "timeout": 300000,
+            "flashboot": "OFF",
+            "image": "test/model:v1",
+            "env": {"HF_TOKEN": "never-show-this-secret", "MODEL_NAME": "mock"},
+            "gpu": {"pools": ["ADA_48_PRO"], "count": 1},
+        }
+        self.calls = []
+        self.patches = []
+        self.write_fault = None
+        self.read_fault = False
+        self.worker_fault = False
+        self.cost_fault = False
+
+    def __call__(self, request):
+        path = request.url.path
+        self.calls.append((request.method, path))
+        if path.endswith("/chat/completions"):
+            assert request.headers["Authorization"] == "Bearer inference-test"
+            assert request.method == "POST"
+            assert "exactly OK" in request.content.decode()
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if path.startswith("/v2/billing"):
+            assert request.headers["Authorization"] == "Bearer bill-test"
+            if self.cost_fault:
+                return httpx.Response(403, text="provider must not be forwarded")
+            if path.endswith("/balance"):
+                return httpx.Response(200, json={"balanceAmount": 42.18, "billingMode": "PREPAID"})
+            params = request.url.params
+            assert params["serverlessId"] == "local-endpoint"
+            days = int(params["lastN"])
+            end = self.now.replace(hour=0) + timedelta(days=1)
+            start = end - timedelta(days=days)
+            return httpx.Response(
+                200,
+                json={
+                    "records": [
+                        {
+                            "serverlessId": "local-endpoint",
+                            "startTime": (end - timedelta(days=1)).isoformat(),
+                            "endTime": end.isoformat(),
+                            "totalAmount": 1.23,
+                        }
+                    ],
+                    "metadata": {
+                        "recordCount": 1,
+                        "query": {
+                            "startTime": start.isoformat(),
+                            "endTime": end.isoformat(),
+                            "bucketSize": "day",
+                            "serverlessId": "local-endpoint",
+                        },
+                        "totals": {"totalAmount": 1.23},
+                    },
+                },
+            )
+        assert request.headers["Authorization"] == "Bearer manage-test"
+        assert path.startswith("/v2/serverless/local-endpoint")
+        if path.endswith("/workers"):
+            if self.worker_fault:
+                return httpx.Response(503)
+            return httpx.Response(
+                200,
+                json={
+                    "summary": {
+                        "idle": 1,
+                        "running": 1,
+                        "initializing": 1,
+                        "throttled": 1,
+                        "unhealthy": 1,
+                        "total": 5,
+                    },
+                    "workers": [
+                        {"status": status, "isStale": status == "RUNNING"}
+                        for status in ("IDLE", "RUNNING", "INITIALIZING", "THROTTLED", "UNHEALTHY")
+                    ],
+                },
+            )
+        if path.endswith("/metrics/requests"):
+            return httpx.Response(
+                200,
+                json={
+                    "records": [
+                        {
+                            "time": (self.now - timedelta(hours=3)).isoformat(),
+                            "requests": 8,
+                            "failed": 1,
+                            "executionTimeMs": {"p95": 50},
+                            "delayTimeMs": {"p95": 25},
+                        },
+                        {"time": self.now.isoformat(), "requests": 0, "failed": 0},
+                    ],
+                    "pagination": {"hasNextPage": False},
+                },
+            )
+        if path.endswith("/metrics/cold-starts"):
+            return httpx.Response(200, json={"records": [], "pagination": {"hasNextPage": False}})
+        assert path == "/v2/serverless/local-endpoint"
+        if request.method == "GET":
+            if self.read_fault:
+                return httpx.Response(503, text="never-show-this-secret")
+            return httpx.Response(200, json=self.config)
+        change = json.loads(request.content)
+        self.patches.append(change)
+        fault = self.write_fault
+        if fault == "rejected":
+            return httpx.Response(422, text="never-show-this-secret")
+        if fault != "timeout":
+            for key, value in change.items():
+                if key == "workers":
+                    self.config[key].update(value)
+                else:
+                    self.config[key] = value
+            if "image" in change:
+                self.config["version"] += 1
+        if fault in {"timeout", "timeout_applied"}:
+            self.write_fault = None
+            raise httpx.ReadTimeout("never-show-this-secret", request=request)
+        return httpx.Response(200, json=self.config)
+
+
+@pytest.fixture
+def mock():
+    return RunpodMock()
+
+
+@pytest.fixture
+def app_factory(mock, tmp_path):
+    config = Config(
+        "local-endpoint",
+        "manage-test",
+        AUTH[1],
+        tmp_path,
+        billing_key="bill-test",
+        inference_key="inference-test",
+        model="synthetic-test",
+        active_rate=Decimal("1.75"),
+        flex_rate=Decimal("2.25"),
+        rate_source="test fixture",
+    )
+
+    def make_app():
+        return create_app(config, transport=httpx.MockTransport(mock), now=lambda: mock.now)
+
+    return make_app
+
+
+@pytest.fixture
+def client(app_factory):
+    with TestClient(app_factory(), base_url="http://127.0.0.1", headers=HEADERS) as client:
+        yield client
+
+
+def state(client):
+    return client.get("/api/state").json()
+
+
+def preview(client, action, **kwargs):
+    draft = {"revision": state(client)["endpoint"]["data"]["revision"], "action": action, **kwargs}
+    return draft, client.post("/api/preview", json=draft)
+
+
+def submit(client, action, **kwargs):
+    draft, response = preview(client, action, **kwargs)
+    assert response.status_code == 200, response.json()
+    preview_data = response.json()
+    return preview_data, client.post(
+        "/api/apply", json=draft | {"confirmation": preview_data["confirmation"]}
+    )
+
+
+def tick(client):
+    control = client.app.state.control
+    client.portal.call(control.tick)
+
+
+def test_private_routes_and_origin(client, mock):
+    for path in ("/", "/assets/panel.js", "/api/state", "/api/metrics", "/api/costs"):
+        assert client.get(path, headers={"authorization": ""}).status_code == 401
+    assert client.post("/api/probe", headers={"authorization": ""}).status_code == 401
+    assert client.get("/healthz", headers={"authorization": ""}).json() == {"status": "ok"}
+    assert client.post("/api/probe", headers={"x-panel-request": "0"}).status_code == 403
+    assert client.post("/api/probe", headers={"origin": "https://foreign.test"}).status_code == 403
+    assert client.post("/api/probe", headers={"sec-fetch-site": "same-site"}).status_code == 403
+    assert client.get("/api/state", headers={"host": "foreign.test"}).status_code == 400
+    assert not mock.calls
+
+
+@pytest.mark.parametrize(
+    "profile,expected",
+    [
+        ("economy", (0, 1)),
+        ("always_ready", (1, 1)),
+        ("autoscaling", (0, 2)),
+        ("ready_with_capacity", (1, 2)),
+    ],
+)
+def test_profiles_preserve_unedited_values(client, mock, profile, expected):
+    mock.config["workers"]["max"] = 3
+    before = deepcopy(mock.config)
+    diff, result = submit(client, "profile", profile=profile)
+    assert result.json()["status"] == "applied"
+    assert (mock.config["workers"]["min"], mock.config["workers"]["max"]) == expected
+    assert diff["diff"]
+    assert diff["estimate"]["warm_two_hours"] == "3.50"
+    assert mock.config["workers"]["initTimeout"] == before["workers"]["initTimeout"]
+    assert mock.config["workers"]["idleTimeout"] == before["workers"]["idleTimeout"]
+    assert mock.config["env"] == before["env"]
+    assert mock.config["gpu"] == before["gpu"]
+    assert "never-show-this-secret" not in client.get("/api/state").text
+
+
+@pytest.mark.parametrize(
+    "values,error",
+    [
+        ({"active": 2}, "active_exceeds_max"),
+        ({"max": -1}, "invalid_input"),
+        ({"active": True}, "invalid_input"),
+        ({"max": 1.5}, "invalid_input"),
+        ({"active": None}, "invalid_input"),
+        ({"idle_timeout": 3601}, "invalid_input"),
+        ({"active": 1, "idle_timeout": 30}, "idle_unavailable"),
+        ({"gpu": "unapproved"}, "invalid_input"),
+    ],
+)
+def test_workers_validation(client, mock, values, error):
+    _, result = preview(client, "workers", **values)
+    assert result.status_code == 422
+    assert result.json()["error"] == error
+    assert not mock.patches
+
+
+def test_idle_timeout_depends_on_endpoint_and_scaler(client, mock):
+    mock.config["scaling"] = {"type": "REQUEST_COUNT", "requestCount": 3}
+    _, result = preview(client, "workers", idle_timeout=20)
+    assert result.json()["error"] == "idle_unavailable"
+    mock.config["type"] = "LOAD_BALANCER"
+    assert submit(client, "workers", idle_timeout=20)[1].json()["status"] == "applied"
+    _, result = preview(client, "settings", scaling={"type": "QUEUE_DELAY", "queueDelay": 0.5})
+    assert result.json()["error"] == "scaling_unavailable"
+
+
+def test_settings_show_diff_and_verify_after_rollout(client, mock):
+    diff, result = submit(
+        client,
+        "settings",
+        name="Renamed",
+        image="test/model:v2",
+        flashboot="FLASHBOOT",
+        scaling={"type": "QUEUE_DELAY", "queueDelay": 0.5},
+        execution_timeout=60000,
+    )
+    assert diff["rollout_warning"]
+    assert {"field": "image", "old": "test/model:v1", "new": "test/model:v2"} in diff["diff"]
+    assert result.json()["status"] == "applied"
+    latest = state(client)
+    assert latest["endpoint"]["data"]["execution_timeout"] == 60000
+    assert set(latest["endpoint"]["data"]["env_names"]) == {"HF_TOKEN", "MODEL_NAME"}
+    assert latest["workers"]["data"] | {"observed_at": None} == {
+        "ready": 1,
+        "busy": 1,
+        "starting": 1,
+        "problem": 2,
+        "stale_workers": 1,
+        "current_ready": 1,
+        "observed_at": None,
+    }
+    assert "env" not in mock.patches[-1]
+    assert preview(client, "settings", env={"HF_TOKEN": "new-secret"})[1].status_code == 422
+
+
+def test_confirmation_tied_to_settings_and_requested_change(client, mock):
+    draft, response = preview(client, "workers", max=2)
+    confirm = response.json()["confirmation"]
+    result = client.post("/api/apply", json=draft | {"max": 3, "confirmation": confirm})
+    assert result.json()["error"] == "confirmation_expired"
+    mock.config["env"]["HF_TOKEN"] = "changed-elsewhere"
+    result = client.post("/api/apply", json=draft | {"confirmation": confirm})
+    assert result.json()["error"] == "configuration_changed"
+    assert not mock.patches
+
+
+def test_api_failures_are_independent_and_redacted(client, mock):
+    mock.read_fault = mock.worker_fault = mock.cost_fault = True
+    overview = client.get("/api/state")
+    assert overview.status_code == 200
+    assert overview.json()["endpoint"]["error"] == "provider_response"
+    assert overview.json()["workers"]["data"] is None
+    assert "never-show-this-secret" not in overview.text
+    assert client.get("/api/costs").json()["today"]["error"] == "provider_auth"
+    mock.read_fault = False
+    mock.write_fault = "rejected"
+    _, result = submit(client, "workers", max=4)
+    assert result.json()["status"] == "provider_rejected"
+    assert "never-show-this-secret" not in result.text
+    assert state(client)["pending"] is None
+
+
+@pytest.mark.parametrize("applied", [True, False])
+def test_timeout_checks_readback_without_repeating_patch(client, mock, applied):
+    mock.write_fault = "timeout_applied" if applied else "timeout"
+    _, result = submit(client, "workers", max=4)
+    assert result.json()["status"] == ("applied" if applied else "write_pending")
+    assert mock.calls[-2:] == [
+        ("PATCH", "/v2/serverless/local-endpoint"),
+        ("GET", "/v2/serverless/local-endpoint"),
+    ]
+    if not applied:
+        assert preview(client, "workers", max=4)[1].json()["error"] == "write_pending"
+        mock.now += timedelta(seconds=61)
+        mock.read_fault = True
+        assert client.post("/api/review").json()["status"] == "write_pending"
+        mock.read_fault = False
+        assert client.post("/api/review").json()["status"] == "write_unconfirmed"
+        assert state(client)["pending"] is None
+    assert len(mock.patches) == 1
+
+
+def test_timer_survives_restart_and_restores_only_active(app_factory, mock):
+    mock.config["workers"]["max"] = 2
+    with TestClient(app_factory(), base_url="http://localhost", headers=HEADERS) as client:
+        _, result = submit(client, "warm")
+        assert result.json()["status"] == "applied"
+        assert state(client)["timer"]["until"] == (NOW + timedelta(hours=2)).isoformat()
+    mock.now += timedelta(hours=2, seconds=1)
+    with TestClient(app_factory(), base_url="http://localhost", headers=HEADERS) as client:
+        tick(client)
+        assert state(client)["result"]["status"] == "timer_restored"
+        assert state(client)["timer"] is None
+    assert mock.patches == [{"workers": {"min": 1}}, {"workers": {"min": 0}}]
+    assert mock.config["workers"]["max"] == 2
+
+
+@pytest.mark.parametrize(
+    "action,kwargs,final",
+    [
+        ("profile", {"profile": "ready_with_capacity"}, 1),
+        ("workers", {"active": 0}, 0),
+        ("workers", {"active": 1}, 1),
+    ],
+)
+def test_manual_mode_cancels_restore(client, mock, action, kwargs, final):
+    submit(client, "warm")
+    diff, result = submit(client, action, **kwargs)
+    assert diff["cancels_timer"]
+    assert result.json()["status"] in {"applied", "timer_cancelled"}
+    number_of_patches = len(mock.patches)
+    mock.now += timedelta(hours=3)
+    tick(client)
+    assert state(client)["timer"] is None
+    assert len(mock.patches) == number_of_patches
+    assert mock.config["workers"]["min"] == final
+
+
+def test_timer_retries_read_and_detects_drift_without_overwriting(client, mock):
+    submit(client, "warm")
+    mock.now += timedelta(hours=3)
+    mock.read_fault = True
+    tick(client)
+    mock.read_fault = False
+    assert state(client)["timer"]["status"] == "timer_read_failed"
+    mock.config["workers"]["max"] = 2
+    tick(client)
+    assert state(client)["timer"]["status"] == "timer_conflict"
+    assert mock.patches == [{"workers": {"min": 1}}]
+
+
+def test_billing_metrics_and_probe(client):
+    costs = client.get("/api/costs").json()
+    assert costs["balance"]["data"] == {"amount": "42.18", "mode": "PREPAID"}
+    for key, days in (("today", 1), ("week", 7), ("month", 30)):
+        period = costs[key]["data"]
+        assert period["total"] == "1.23"
+        assert len(period["records"]) == days
+        assert period["records"][-1] == {"day": "2026-11-27", "amount": "1.23"}
+        assert all(row["amount"] is None for row in period["records"][:-1])
+    metrics = client.get("/api/metrics").json()
+    assert metrics["requests"]["data"]["requests"]["status"] == "current"
+    assert metrics["requests"]["data"]["execution_p95"]["status"] == "stale"
+    assert metrics["cold_starts"]["data"]["cold_starts"]["status"] == "unavailable"
+    assert client.post("/api/probe").json()["status"] == "probe_ok"
