@@ -13,7 +13,7 @@ const sessionId = '11111111-1111-4111-8111-111111111111'
 const quoteId = '22222222-2222-4222-8222-222222222222'
 const nextQuoteId = '33333333-3333-4333-8333-333333333333'
 const pdf = new Blob(['%PDF-1.4\n% SYNTHETIC TEST'], { type: 'application/pdf' })
-const approveLabel = 'Одобрить КП и получить счёт для согласования'
+const approveLabel = 'Одобрить КП и получить счёт'
 const quote = vi.mocked(requestQuoteDraft)
 const approve = vi.mocked(approveQuoteDraft)
 const invoice = vi.mocked(requestInvoiceDraft)
@@ -23,7 +23,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   quote.mockResolvedValue({ blob: pdf, quoteId, invoicesEnabled: true })
   approve.mockResolvedValue(undefined)
-  invoice.mockResolvedValue(pdf)
+  invoice.mockResolvedValue({ blob: pdf, testPayment: false })
 })
 
 function setup() {
@@ -48,7 +48,6 @@ it('requires an explicit approval after creating the PDF, blocks duplicate appro
   await createQuote()
   expect(quote).toHaveBeenCalledWith(sessionId, { customer_name: 'Синтетический заказчик', quantity: 1 }, expect.any(AbortSignal))
   expect(download).toHaveBeenCalledWith(pdf, 'quote.pdf')
-  expect(screen.getByText('Счёт для согласования. Оплата по этому документу не предусмотрена.')).toBeVisible()
   expect(approve).not.toHaveBeenCalled()
   expect(invoice).not.toHaveBeenCalled()
   const button = screen.getByRole('button', { name: approveLabel })
@@ -60,6 +59,7 @@ it('requires an explicit approval after creating the PDF, blocks duplicate appro
   expect(invoice).not.toHaveBeenCalled()
   await act(async () => confirm())
   const repeat = await screen.findByRole('button', { name: 'Скачать счёт для согласования' })
+  expect(screen.getByText('Счёт для согласования. Оплата по этому документу не предусмотрена.')).toBeVisible()
   await waitFor(() => expect(repeat).toBeEnabled())
   expect(invoice).toHaveBeenCalledExactlyOnceWith(sessionId, quoteId, expect.any(AbortSignal))
   fireEvent.click(repeat)
@@ -96,7 +96,7 @@ it('retains a successful approval when invoice delivery fails and retries only t
   expect(approve).toHaveBeenCalledOnce()
   expect(invoice).toHaveBeenCalledOnce()
   expect(screen.queryByRole('button', { name: approveLabel })).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: 'Скачать счёт для согласования' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Скачать счёт' }))
   await waitFor(() => expect(download).toHaveBeenCalledWith(pdf, 'invoice-for-review.pdf'))
   expect(invoice).toHaveBeenCalledTimes(2)
   expect(invoice.mock.calls[1]![1]).toBe(quoteId)

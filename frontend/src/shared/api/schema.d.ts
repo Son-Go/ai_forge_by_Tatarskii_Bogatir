@@ -140,7 +140,7 @@ export interface paths {
         put?: never;
         /**
          * Получить PDF счёта по одобренному КП
-         * @description Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. Повтор для того же quote_id возвращает ранее выданный PDF. Документ предназначен для согласования и содержит справочные реквизиты поставщика.
+         * @description Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует CHAT_QUOTES_ENABLED=true и явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. При CHAT_TEST_PAYMENT_INVOICES_ENABLED=true новый PDF «Счёт на оплату» содержит пробный номер и реквизиты поставщика. В обычном режиме выдаётся счёт для согласования. Повтор для того же quote_id возвращает сохранённый документ с исходным назначением.
          */
         post: operations["createInvoiceDraft"];
         delete?: never;
@@ -546,10 +546,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description PDF счёта для согласования */
+            /** @description PDF счёта для согласования или тестовый счёт на оплату */
             200: {
                 headers: {
                     "Content-Disposition"?: string;
+                    "X-Invoice-Purpose"?: "agreement" | "test_payment";
+                    /** @description Присутствует только у тестового счёта на оплату. */
+                    "X-Invoice-Number"?: string;
                     [name: string]: unknown;
                 };
                 content: {

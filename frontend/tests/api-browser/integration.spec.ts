@@ -164,6 +164,7 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   let approval = false
   let offerChanged = false
   let quoteId = caseId
+  let testPayment = false
   let selectedOffer = offer
   const updatedOffer = { ...offer, catalog_version: caseId, price: { amount: '13000', currency: 'RUB' }, name: 'Лицензия с обновлённой ценой' }
   const invoiceRequests: string[] = []
@@ -186,7 +187,8 @@ test('quote sends schema fields, keeps the form after errors and approves the do
           updated_offer: updatedOffer } }); return
       }
       invoiceRequests.push(input.quote_id)
-      await route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n% SYNTHETIC INVOICE PDF' }); return
+      await route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n% SYNTHETIC INVOICE PDF',
+        headers: { 'X-Invoice-Purpose': testPayment ? 'test_payment' : 'agreement' } }); return
     }
     if (path.endsWith('/selection')) {
       expect(request.postDataJSON()).toEqual({ offer_id: offer.offer_id, catalog_version: updatedOffer.catalog_version })
@@ -211,13 +213,13 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   const download = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
   expect((await download).suggestedFilename()).toBe('quote.pdf')
-  await expect(page.getByText('Счёт для согласования. Оплата по этому документу не предусмотрена.')).toBeVisible()
   await expect(page.locator('html')).toHaveJSProperty('scrollWidth', page.viewportSize()!.width)
   const invoice = page.getByRole('button', { name: 'Скачать счёт для согласования' })
   await expect(invoice).toHaveCount(0)
   const issuedDownload = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' }).click()
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт' }).click()
   expect((await issuedDownload).suggestedFilename()).toBe('invoice-for-review.pdf')
+  await expect(page.getByText('Счёт для согласования. Оплата по этому документу не предусмотрена.')).toBeVisible()
   const repeatedDownload = page.waitForEvent('download')
   await invoice.click()
   expect((await repeatedDownload).suggestedFilename()).toBe('invoice-for-review.pdf')
@@ -228,11 +230,11 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
   await newDownload
   offerChanged = true
-  await page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' }).click()
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт' }).click()
   await expect(page.getByRole('heading', { name: 'Обновлённое предложение' })).toBeVisible()
   await expect(page.getByText('Лицензия с обновлённой ценой', { exact: true })).toBeVisible()
   await expect(invoice).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Одобрить КП и получить счёт' })).toHaveCount(0)
   await page.getByRole('article', { name: updatedOffer.name }).getByRole('button', { name: 'Выбрать', exact: true }).click()
   await page.getByRole('button', { name: 'Сформировать КП', exact: true }).click()
   await customer.fill('Синтетический заказчик')
@@ -245,8 +247,10 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   await expect(invoice).toHaveCount(0)
   expect(approval).toBe(false)
   expect(invoiceRequests).toEqual([caseId, caseId])
+  testPayment = true
   const updatedInvoiceDownload = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' }).click()
-  expect((await updatedInvoiceDownload).suggestedFilename()).toBe('invoice-for-review.pdf')
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт' }).click()
+  expect((await updatedInvoiceDownload).suggestedFilename()).toBe('test-payment-invoice.pdf')
+  await expect(page.getByRole('button', { name: 'Скачать тестовый счёт на оплату' })).toBeVisible()
   expect(invoiceRequests).toEqual([caseId, caseId, quoteId])
 })
