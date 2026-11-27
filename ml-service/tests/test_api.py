@@ -177,7 +177,7 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
         )
         assert request.headers["Authorization"] == "Bearer provider-test"
         assert request.headers["X-Request-Id"] == INTERPRET["request_id"]
-        assert request.extensions["timeout"]["read"] == 120.0
+        assert request.extensions["timeout"]["read"] == 180.0
         body = json.loads(request.content)
         assert body["model"] == "org/model-awq"
         assert body["stream"] is False
@@ -437,7 +437,10 @@ async def test_provider_error_contains_no_upstream_payload(settings):
     assert "private provider text" not in response.text
 
 
-@pytest.mark.parametrize("remaining_ms, seconds", [(28_000, 28), (119_000, 119), (160_000, 120)])
+@pytest.mark.parametrize(
+    "remaining_ms, seconds",
+    [(28_000, 28), (90_000, 90), (160_000, 160), (180_000, 180), (240_000, 180)],
+)
 async def test_deadline_uses_remaining_budget_up_to_service_limit(remaining_ms, seconds):
     clock = asyncio.get_running_loop().time
     started = clock()

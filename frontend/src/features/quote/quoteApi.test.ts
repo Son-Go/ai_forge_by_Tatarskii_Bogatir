@@ -11,7 +11,7 @@ it('uses the existing same-origin POST contract and accepts a validated PDF', as
     body = await incoming.json()
     return new HttpResponse('%PDF-1.4\n% test', { headers: { 'Content-Type': 'application/pdf' } })
   }))
-  const blob = await requestQuoteDraft('demo-session', { customer_name: '  Демо заказчик  ', quantity: 1 }, new AbortController().signal)
+  const { blob } = await requestQuoteDraft('demo-session', { customer_name: '  Демо заказчик  ', quantity: 1 }, new AbortController().signal)
   expect(await blob.text()).toContain('%PDF-')
   expect(request!.method).toBe('POST')
   expect(request!.credentials).toBe('same-origin')

@@ -27,7 +27,7 @@ export function CaseDetail({ record }: { record: HandoffCase }) {
       {record.offers.length ? <div className="offer-grid">{record.offers.map((offer) => <OfferCard key={`${offer.offer_id}:${offer.catalog_version}`} offer={offer} sources={record.sources} readOnly />)}</div> : <p className="muted">Конкретные позиции ещё не были предложены.</p>}
       <SourcesList sources={record.sources} />
     </section>
-    <section className="case-section case-documents"><Icon name="file" /><div><h3>Коммерческие документы</h3><p>Черновик КП доступен клиенту после выбора, если функция включена на сервере. Счёт не подключён: необходим отдельный контракт Backend.</p></div></section>
+    <section className="case-section case-documents"><Icon name="file" /><div><h3>Коммерческие документы</h3><p>Клиент может подготовить КП после выбора позиции и скачать счёт для согласования после одобрения КП, если эти функции включены на сервере.</p></div></section>
     <p className="manager-footnote"><Icon name="shield" />Содержимое переписки и источников требует проверки. Управление CRM не входит в этот интерфейс.</p>
   </article>
 }
@@ -51,7 +51,7 @@ export function ManagerWorkspace({ caseId, cases, demo = false, detail, controls
           <span className="case-item-meta"><span>{record.id}</span><time dateTime={record.createdAt}>{formatDate(record.createdAt)}</time></span>
           <strong>{record.title}</strong><span className="case-item-reason"><Icon name={record.reason === 'documents' ? 'file' : 'user'} />{handoffReasons[record.reason]}</span><StatusBadge status={record.status} />
         </a>)}</nav>
-        {!visible.length && <div className="queue-empty"><Icon name="search" /><p>Обращений не найдено</p><button type="button" onClick={() => { setQuery(''); setFilter('all') }}>Сбросить фильтры</button></div>}
+        {!visible.length && <div className="queue-empty"><p>Обращений не найдено</p>{(query.trim() || filter !== 'all') && <button type="button" onClick={() => { setQuery(''); setFilter('all') }}>Сбросить фильтры</button>}</div>}
         <p className="queue-disclaimer"><Icon name="shield" />{demo ? 'Синтетические примеры. ' : ''}Поиск и фильтры применяются только к загруженной странице.</p>
         {pagination}
       </aside>

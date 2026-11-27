@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { handoffReasons, type HandoffCase } from '../../entities/handoff/types'
-import { handoffApi, type AssignedHandoff, type ManagerReplyInput, type QueueItem } from '../../shared/api/handoffApi'
+import { handoffApi, managerQueuePageSize, type AssignedHandoff, type ManagerReplyInput, type QueueItem } from '../../shared/api/handoffApi'
 import { ApiError } from '../../shared/api/client'
 import { CaseDetail, ManagerWorkspace } from './ManagerWorkspace'
 import { Icon } from '../../shared/ui/Icon'
@@ -84,7 +84,10 @@ export function ManagerConnected({ token, caseId, onLogout }: { token: string; c
     return () => { request.abort(); clearTimeout(timer) }
   }, [token, caseId, revision])
 
-  const items = queue?.offset === offset ? queue.items : []
+  const currentPage = queue?.offset === offset ? queue : null
+  const items = currentPage?.items.slice(0, managerQueuePageSize) ?? []
+  const hasPrevious = offset > 0
+  const hasNext = !!currentPage && currentPage.items.length > managerQueuePageSize
   const selected = items.find((item) => item.handoff_id === caseId)
   const context = detail?.id === caseId ? detail : null
   async function act(kind: 'claim' | 'resolve' | 'reply', input?: ManagerReplyInput): Promise<boolean> {
@@ -113,15 +116,16 @@ export function ManagerConnected({ token, caseId, onLogout }: { token: string; c
       return false
     } finally { if (operation.current === request) { operation.current = null; setBusy(false) } }
   }
-  const error = queue?.offset === offset ? queue.error : ''
+  const error = currentPage?.error
   return <ManagerWorkspace cases={items.map((item) => presentation(item))} caseId={caseId}
     controls={<button type="button" className="quiet-action" onClick={() => onLogout()}>Выйти</button>}
     pagination={<div className="queue-pagination">
-      {(!queue || queue.offset !== offset) && <p role="status">Загружаем очередь…</p>}
+      {!currentPage && <p role="status">Загружаем очередь…</p>}
       {error && <p role="alert">{error}</p>}
-      <p>На странице: {items.length} · смещение: {offset}</p>
-      <div><button type="button" disabled={offset === 0} onClick={() => setOffset((value) => Math.max(0, value - 50))}>Назад</button>
-        <button type="button" disabled={items.length < 50} onClick={() => setOffset((value) => value + 50)}>Далее</button></div>
+      {(hasPrevious || hasNext) && <nav aria-label="Страницы очереди">
+        {hasPrevious && <button type="button" onClick={() => setOffset(offset - managerQueuePageSize)}>Назад</button>}
+        {hasNext && <button type="button" onClick={() => setOffset(offset + managerQueuePageSize)}>Далее</button>}
+      </nav>}
       <button type="button" className="quiet-action" onClick={() => setRevision((value) => value + 1)}>Обновить</button>
     </div>}
     detail={caseId ? <>

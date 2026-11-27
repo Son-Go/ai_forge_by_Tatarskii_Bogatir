@@ -29,7 +29,7 @@ test('themes preserve geometry, preference, official branding and client state',
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /Поможем найти/ })).toBeVisible()
-  const selectors = ['.header', '.brand-image', '.main', '.workspace-bar', '.scenario-card', '.composer', '.composer textarea']
+  const selectors = ['.header', '.brand-image', '.main', '.workspace-bar', '.example-questions', '.composer', '.composer textarea']
   // Keep dimensions identical; color and image content are the only theme changes.
   const dark = await geometry(page, selectors)
   const input = page.getByRole('textbox', { name: 'Ваше сообщение' })
@@ -45,7 +45,7 @@ test('themes preserve geometry, preference, official branding and client state',
   await input.fill('Подобрать решение на 50 пользователей')
   await page.getByRole('button', { name: 'Отправить', exact: true }).click()
   await page.getByRole('button', { name: 'Выбрать', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Подготовить демочерновик КП' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Подготовить КП' })).toBeVisible()
   await page.locator('.conversation').evaluate((el) => { el.scrollTop = el.scrollHeight })
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
   const chat = await geometry(page, ['.main', '.message-user .message-content', '.offer-card', '.sources', '.composer'])
@@ -90,7 +90,7 @@ for (const theme of ['light', 'dark'] as const) {
       }
       const light = document.documentElement.dataset.theme === 'light'
       const backings = light ? [[255, 255, 255], [245, 246, 248], [240, 222, 228]] : [[21, 20, 28], [33, 26, 37], [96, 48, 67]]
-      return [['.header', '.header-nav a', ''], ['.main', '.welcome-copy > p', ''], ['.composer', '.composer textarea', '::placeholder']].flatMap(([surface, text, pseudo]) => {
+      return [['.header', '.header-nav a', ''], ['.main', '.welcome > p', ''], ['.composer', '.composer textarea', '::placeholder']].flatMap(([surface, text, pseudo]) => {
         const background = parse(getComputedStyle(document.querySelector(surface!)!).backgroundColor)
         const foreground = parse(getComputedStyle(document.querySelector(text!)!, pseudo || null).color)
         return backings.map((backing) => {

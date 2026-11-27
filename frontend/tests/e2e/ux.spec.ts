@@ -3,7 +3,7 @@ import { expect, test, type Page } from '@playwright/test'
 async function recommendation(page: Page) {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /Поможем найти/ })).toBeVisible()
-  await page.getByRole('button', { name: 'Подобрать решение', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Ваше сообщение' }).fill('Подобрать решение на 50 пользователей')
   await page.getByRole('button', { name: 'Отправить', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Выбрать', exact: true })).toBeEnabled()
 }

@@ -11,15 +11,14 @@ function resizeTextarea(element: HTMLTextAreaElement) {
   element.style.overflowY = contentHeight > max ? 'auto' : 'hidden'
 }
 
-export function MessageComposer({ disabled, suggestion, onSend, onEdited }: {
-  disabled: boolean; suggestion: string; onSend: (text: string) => Promise<string | null>; onEdited: () => void
+export function MessageComposer({ disabled, placeholder, onSend }: {
+  disabled: boolean; placeholder: string; onSend: (text: string) => Promise<string | null>
 }) {
   const [text, setText] = useState('')
   const textarea = useRef<HTMLTextAreaElement>(null)
-  const value = suggestion || text
   useLayoutEffect(() => {
     if (textarea.current) resizeTextarea(textarea.current)
-  }, [value])
+  }, [text])
   useLayoutEffect(() => {
     const element = textarea.current
     if (!element || typeof ResizeObserver === 'undefined') return
@@ -37,24 +36,23 @@ export function MessageComposer({ disabled, suggestion, onSend, onEdited }: {
   }, [])
   function submit(event?: FormEvent) {
     event?.preventDefault()
-    if (disabled || !value.trim() || value.trim().length > 4000) return
-    const sentText = value
-    void onSend(value).then((rejected) => { if (rejected) setText((current) => current || rejected) })
-      .catch(() => setText((current) => current || sentText))
-    setText(''); onEdited()
+    if (disabled || !text.trim() || text.trim().length > 4000) return
+    void onSend(text).then((rejected) => { if (rejected) setText((current) => current || rejected) })
+      .catch(() => setText((current) => current || text))
+    setText('')
   }
   return <form className="composer" aria-label="Ввод сообщения" onSubmit={submit} onClick={(event) => {
     if (event.target instanceof Element && !event.target.closest('button')) textarea.current?.focus()
   }}>
     <label className="sr-only" htmlFor="message">Ваше сообщение</label>
     <div className="composer-input"><div className="composer-text-area">
-    <textarea ref={textarea} id="message" name="message" maxLength={4000} value={value} rows={1} placeholder="Напишите сообщение..."
-      onChange={(event) => { setText(event.target.value); onEdited() }}
+    <textarea ref={textarea} id="message" name="message" maxLength={4000} value={text} rows={1} placeholder={placeholder}
+      onChange={(event) => setText(event.target.value)}
       onKeyDown={(event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() }
       }} />
     </div>
-      <button type="submit" className="primary" aria-label="Отправить" title="Отправить сообщение" disabled={disabled || !value.trim() || value.trim().length > 4000}><Icon name="send" /></button>
+      <button type="submit" className="primary" aria-label="Отправить" title="Отправить сообщение" disabled={disabled || !text.trim() || text.trim().length > 4000}><Icon name="send" /></button>
     </div>
   </form>
 }

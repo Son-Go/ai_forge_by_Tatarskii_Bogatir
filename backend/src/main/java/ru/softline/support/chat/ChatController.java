@@ -32,15 +32,13 @@ class ChatController {
     private static final String COOKIE = "softline_session";
     private final ChatStore store;
     private final ChatFlow flow;
-    private final DocumentDraftPdf draftPdf;
     private final Set<String> origins;
     private final RateWindow rate = new RateWindow();
 
-    ChatController(ChatStore store, ChatFlow flow, DocumentDraftPdf draftPdf,
+    ChatController(ChatStore store, ChatFlow flow,
                    @Value("${chat.public-origin:http://localhost:8080}") String publicOrigins) {
         this.store = store;
         this.flow = flow;
-        this.draftPdf = draftPdf;
         this.origins = Set.copyOf(Arrays.stream(publicOrigins.split(",", -1))
                 .map(String::strip).map(ChatController::validatedOrigin).toList());
     }
@@ -105,24 +103,38 @@ class ChatController {
     ResponseEntity<byte[]> quote(@PathVariable UUID id, @RequestBody(required = false) DocumentDraftRequest input,
                                  HttpServletRequest request,
                                  @CookieValue(value = COOKIE, required = false) String token) throws IOException {
-        return draft(id, input, request, token, DraftKind.QUOTE);
+        requireDocumentRequest(id, request);
+        QuotePdf quote = store.createQuote(id, token, input);
+        return download(DraftKind.QUOTE)
+                .header("X-Quote-Id", quote.id().toString())
+                .header("X-Invoice-Drafts-Enabled", Boolean.toString(quote.invoiceDraftsEnabled())).body(quote.bytes());
+    }
+
+    @PostMapping("/{id}/quote-drafts/{quoteId}/approval")
+    ResponseEntity<Void> approveQuote(@PathVariable UUID id, @PathVariable UUID quoteId, HttpServletRequest request,
+                                      @CookieValue(value = COOKIE, required = false) String token) {
+        requireDocumentRequest(id, request);
+        store.approveQuote(id, token, quoteId);
+        return ResponseEntity.noContent().header(HttpHeaders.CACHE_CONTROL, "no-store").build();
     }
 
     @PostMapping("/{id}/invoice-drafts")
-    ResponseEntity<byte[]> invoiceDraft(@PathVariable UUID id, @RequestBody(required = false) DocumentDraftRequest input,
+    ResponseEntity<byte[]> invoiceDraft(@PathVariable UUID id, @RequestBody(required = false) InvoiceDraftRequest input,
                                         HttpServletRequest request,
                                         @CookieValue(value = COOKIE, required = false) String token) throws IOException {
-        return draft(id, input, request, token, DraftKind.INVOICE);
+        requireDocumentRequest(id, request);
+        return download(DraftKind.INVOICE).body(store.issueInvoice(id, token, input));
     }
 
-    private ResponseEntity<byte[]> draft(UUID id, DocumentDraftRequest input, HttpServletRequest request,
-                                         String token, DraftKind kind) throws IOException {
+    private void requireDocumentRequest(UUID id, HttpServletRequest request) {
         requireOrigin(request);
         rate.take("session:" + id, 30);
-        byte[] pdf = draftPdf.render(store.prepareDraft(id, token, input, kind), kind);
+    }
+
+    private static ResponseEntity.BodyBuilder download(DraftKind kind) {
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_PDF)
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + kind.fileName)
-                .header(HttpHeaders.CACHE_CONTROL, "no-store").body(pdf);
+                .header(HttpHeaders.CACHE_CONTROL, "no-store");
     }
 
     private void requireOrigin(HttpServletRequest request) {

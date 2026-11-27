@@ -94,10 +94,33 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Сформировать черновик КП по сохранённому выбору
-         * @description Доступность возвращает quotes_enabled. Нужен подтверждённый выбор в сессии. При изменении предложения подтвердите новую карточку через selection. Количество относится к единице выбранной позиции, указанной в предложении.
+         * Сформировать КП по сохранённому выбору
+         * @description Доступность возвращает quotes_enabled. Нужен подтверждённый выбор в сессии. Сервер сохраняет условия и создаёт новую версию КП. При изменении предложения подтвердите новую карточку через selection. Количество относится к единице выбранной позиции.
          */
         post: operations["createQuoteDraft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/quote-drafts/{quote_id}/approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: components["parameters"]["SessionId"];
+                quote_id: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Подтвердить условия конкретной версии КП
+         * @description Одобрение идемпотентно. QUOTE_SUPERSEDED означает, что нужно сформировать новую версию. При OFFER_CHANGED подтвердите актуальную карточку, сформируйте новое КП и одобрите его.
+         */
+        post: operations["approveQuoteDraft"];
         delete?: never;
         options?: never;
         head?: never;
@@ -116,8 +139,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Сформировать PDF-черновик счёта по сохранённому выбору
-         * @description Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Цена и валюта берутся из каталога. При изменении предложения возвращается OFFER_CHANGED, после чего нужно подтвердить новую карточку через selection. Черновик предназначен для согласования, выдаётся без реквизитов оплаты и не сохраняется.
+         * Получить PDF счёта по одобренному КП
+         * @description Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. Повтор для того же quote_id возвращает ранее выданный PDF. Документ предназначен для согласования и содержит справочные реквизиты поставщика.
          */
         post: operations["createInvoiceDraft"];
         delete?: never;
@@ -166,6 +189,9 @@ export interface components {
         /** Format: uuid */
         Uuid: string;
         QuoteRequest: components["schemas"]["DocumentDraftRequest"];
+        InvoiceDraftRequest: {
+            quote_id: components["schemas"]["Uuid"];
+        };
         DocumentDraftRequest: {
             customer_name: string;
             quantity: number;
@@ -441,15 +467,46 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Черновик PDF */
+            /** @description PDF коммерческого предложения */
             200: {
                 headers: {
                     "Content-Disposition"?: string;
+                    /** @description Идентификатор сохранённой версии КП. */
+                    "X-Quote-Id"?: components["schemas"]["Uuid"];
+                    /** @description Доступность счёта после одобрения КП. */
+                    "X-Invoice-Drafts-Enabled"?: boolean;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/pdf": string;
                 };
+            };
+            400: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            429: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+        };
+    };
+    approveQuoteDraft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: components["parameters"]["SessionId"];
+                quote_id: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Условия КП подтверждены */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             400: components["responses"]["Error"];
             403: components["responses"]["Error"];
@@ -470,11 +527,11 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["DocumentDraftRequest"];
+                "application/json": components["schemas"]["InvoiceDraftRequest"];
             };
         };
         responses: {
-            /** @description PDF-черновик счёта */
+            /** @description PDF счёта для согласования */
             200: {
                 headers: {
                     "Content-Disposition"?: string;

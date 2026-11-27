@@ -11,6 +11,8 @@ final class ChatTypes {
     record Send(UUID clientMessageId, String text, UUID retryOfTurnId) {}
     record Choose(String offerId, UUID catalogVersion) {}
     record DocumentDraftRequest(String customerName, BigDecimal quantity) {}
+    record InvoiceDraftRequest(UUID quoteId) {}
+    record QuotePdf(UUID id, boolean invoiceDraftsEnabled, byte[] bytes) {}
     record DocumentDraft(String customerName, String name, String vendorCode, int quantity,
                          BigDecimal unitPrice, String currency) {
         BigDecimal total() {
@@ -18,8 +20,8 @@ final class ChatTypes {
         }
     }
     enum DraftKind {
-        QUOTE("Коммерческое предложение", "quote-draft.pdf", "НДС, условия оплаты, срок поставки и срок действия уточняет менеджер."),
-        INVOICE("Счёт", "invoice-draft.pdf", "Черновик для согласования. Оплата по документу не предусмотрена.");
+        QUOTE("Коммерческое предложение", "quote.pdf", "НДС, условия оплаты, срок поставки и срок действия уточняет менеджер."),
+        INVOICE("Счёт", "invoice.pdf", "Оплата по документу не предусмотрена.");
 
         final String title;
         final String fileName;
@@ -31,9 +33,6 @@ final class ChatTypes {
             this.note = note;
         }
 
-        String errorCode(String suffix) {
-            return name() + "_" + suffix;
-        }
     }
     record Owner(UUID id, String token) {}
     record Message(UUID id, String role, String text, String status,

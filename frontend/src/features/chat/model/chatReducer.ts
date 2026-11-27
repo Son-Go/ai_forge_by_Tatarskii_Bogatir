@@ -1,9 +1,14 @@
 import type { ChatEvent, Message, Offer, Session } from '../../../shared/api/types'
+import type { RecentSession } from '../lib/sessionStorage'
 
 export type Phase = 'booting' | 'ready' | 'sending' | 'streaming' | 'recovering' | 'selecting' | 'unavailable'
 export type Issue = { message: string; action?: 'restore' | 'retry' | 'resend' | 'new-session'; requestId?: string }
+export interface RecentDialog extends RecentSession { title: string }
 export interface ChatState {
   session: Session | null
+  recentDialogs: RecentDialog[]
+  recentIssue: string | null
+  composerKey: number
   phase: Phase
   stage: 'interpreting' | 'searching' | 'generating' | null
   optimistic: Message | null
@@ -13,16 +18,17 @@ export interface ChatState {
   rejectedText: string | null
 }
 export const initialState: ChatState = {
-  session: null, phase: 'booting', stage: null, optimistic: null, streamText: '', issue: null, updatedOffer: null, rejectedText: null,
+  session: null, recentDialogs: [], recentIssue: null, composerKey: 0, phase: 'booting', stage: null, optimistic: null, streamText: '', issue: null, updatedOffer: null, rejectedText: null,
 }
 export type Action =
   | { type: 'patch'; value: Partial<ChatState> }
   | { type: 'session'; session: Session }
   | { type: 'event'; event: ChatEvent }
-  | { type: 'reset' }
+  | { type: 'reset'; phase?: 'ready' }
 
 export function chatReducer(state: ChatState, action: Action): ChatState {
-  if (action.type === 'reset') return { ...initialState }
+  if (action.type === 'reset') return { ...initialState, recentDialogs: state.recentDialogs,
+    composerKey: state.composerKey + 1, phase: action.phase ?? initialState.phase }
   if (action.type === 'patch') return { ...state, ...action.value }
   if (action.type === 'session') return {
     ...state, session: action.session, phase: action.session.last_turn?.status === 'running' ? 'recovering' : 'ready',

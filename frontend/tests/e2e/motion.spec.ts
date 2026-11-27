@@ -56,7 +56,7 @@ test('reduced motion disables entry, waiting and hover motion without hiding con
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /Поможем найти/ })).toBeVisible()
-  await expect(page.locator('.scenario-card').first()).toHaveCSS('transition-duration', '0s')
+  await expect(page.locator('.example-questions')).toHaveCSS('transition-duration', '0s')
   await page.getByRole('textbox').fill('Подобрать решение на 50 пользователей')
   await page.getByRole('button', { name: 'Отправить', exact: true }).click()
   await expect(page.locator('.spinner')).toHaveCSS('animation-name', 'none')
@@ -71,7 +71,7 @@ test('reduced motion disables entry, waiting and hover motion without hiding con
 test('reading cards stay opaque and glass has a solid fallback', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /Поможем найти/ })).toBeVisible()
-  await expect(page.locator('.scenario-card').first()).toHaveCSS('background-color', 'rgb(41, 42, 49)')
+  await expect(page.locator('.example-questions')).toHaveCSS('background-color', 'rgb(41, 42, 49)')
   const glass = await page.locator('.header').evaluate((el) => {
     const style = getComputedStyle(el)
     return {
@@ -103,7 +103,7 @@ test('glass keeps text contrast across the burgundy background and manager respe
     // Conservative dark backings covering both graphite endpoints and the warmer glow.
     const backings = [[21, 20, 28], [33, 26, 37], [96, 48, 67]]
     const samples = [
-      ['.header', '.header-nav a', ''], ['.main', '.welcome-copy > p', ''],
+      ['.header', '.header-nav a', ''], ['.main', '.welcome > p', ''],
       ['.composer', '.composer textarea', '::placeholder'],
     ]
     return samples.flatMap(([surface, text, pseudo]) => {

@@ -33,9 +33,15 @@ test('branded welcome remains accessible and responsive', async ({ page }, testI
   expect(branding.ratio).toBeCloseTo(524.41 / 115.4, 2)
   expect(branding.horizontalClear).toBeGreaterThanOrEqual(.99)
   expect(branding.verticalClear).toBeGreaterThanOrEqual(18)
-  expect((await page.locator('.header').boundingBox())!.height).toBeLessThanOrEqual(testInfo.project.name === 'mobile' ? 73 : 85)
+  expect((await page.locator('.header').boundingBox())!.height).toBeLessThanOrEqual(testInfo.project.name === 'mobile' ? 63 : 69)
   expect(branding.filter).toBe('none')
-  for (const name of ['Знаю продукт', 'Подобрать решение', 'Задать вопрос']) await expect(page.getByRole('button', { name, exact: true })).toBeVisible()
+  const examples = page.getByRole('list', { name: 'Примеры вопросов' })
+  await expect(examples.getByRole('listitem')).toHaveText([
+    'Какая лицензия MDaemon подойдёт для 50 пользователей?',
+    'Как защитить почту и файлы 50 сотрудников?',
+    'Какие документы нужны для покупки лицензии?',
+  ])
+  await expect(examples.locator('button, a, [tabindex]')).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('welcome.png'), fullPage: true, animations: 'disabled' })
 
   const ratios = await page.evaluate(() => {
@@ -55,12 +61,17 @@ test('branded welcome remains accessible and responsive', async ({ page }, testI
   await expect(page.getByRole('link', { name: 'Перейти к консультации' })).toBeFocused()
   await page.keyboard.press('Enter')
   await expect(page.locator('main')).toBeFocused()
-  await page.getByRole('button', { name: 'Знаю продукт', exact: true }).click()
-  await expect(page.getByRole('textbox', { name: 'Ваше сообщение' })).toBeFocused()
+  const input = page.getByRole('textbox', { name: 'Ваше сообщение' })
+  await expect(input).toHaveValue('')
+  await input.fill('Мой вопрос')
+  await examples.getByRole('listitem').first().click()
+  await expect(input).toHaveValue('Мой вопрос')
+  await expect(input).not.toBeFocused()
 
   await page.setViewportSize({ width: 320, height: 568 })
   await page.reload()
   await expect(heading).toBeInViewport()
+  await expect(input).toBeInViewport()
   await expect(page.locator('html')).toHaveJSProperty('scrollWidth', 320)
   await page.screenshot({ path: testInfo.outputPath('welcome-compact.png'), fullPage: true, animations: 'disabled' })
 })
@@ -113,7 +124,7 @@ test('compact composer grows, caps and shrinks with text and viewport changes', 
   const send = page.getByRole('button', { name: 'Отправить', exact: true })
   const row = page.locator('.composer-input')
   await expect(page.locator('label[for="message"]')).toHaveClass('sr-only')
-  await expect(input).toHaveAttribute('placeholder', 'Напишите сообщение...')
+  await expect(input).toHaveAttribute('placeholder', /\?$/)
   async function centered() {
     const [area, field, button] = await Promise.all([row.boundingBox(), input.boundingBox(), send.boundingBox()])
     expect(Math.abs((field!.y + field!.height / 2) - (area!.y + area!.height / 2))).toBeLessThanOrEqual(1)
