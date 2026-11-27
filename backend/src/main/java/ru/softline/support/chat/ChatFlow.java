@@ -47,7 +47,7 @@ class ChatFlow {
              @Value("${chat.cold-turn-timeout-ms}") long coldTimeoutMillis,
              @Value("${chat.model-idle-ms}") long modelIdleMillis) {
         if (parallel < 1 || warmTimeoutMillis < 100 || coldTimeoutMillis < warmTimeoutMillis
-                || coldTimeoutMillis > 300_000 || modelIdleMillis < 1 || modelIdleMillis > 86_400_000) {
+                || coldTimeoutMillis > 1_200_000 || modelIdleMillis < 1 || modelIdleMillis > 86_400_000) {
             throw new IllegalArgumentException("Invalid turn limits");
         }
         this.store = store;
@@ -295,8 +295,11 @@ class ChatFlow {
 
     private static void sendFailure(SseEmitter emitter, Turn turn, String code, boolean retryable) {
         try {
+            String message = "TURN_TIMEOUT".equals(code)
+                    ? "Истекло время ожидания модели. Можно повторить запрос."
+                    : "Не удалось завершить ответ. Можно повторить запрос.";
             send(emitter, "failed", Map.of("turn_id", turn.turnId(), "code", code,
-                    "message", "Не удалось завершить ответ. Можно повторить запрос.", "retryable", retryable));
+                    "message", message, "retryable", retryable));
         } catch (IOException | IllegalStateException ex) {
             log.debug("SSE disconnected request_id={}", turn.requestId());
         }

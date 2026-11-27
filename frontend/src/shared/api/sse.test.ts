@@ -26,6 +26,13 @@ describe('SSE transport', () => {
     await readChatStream(response(text, 10000), (e) => events.push(e))
     expect(events.map((e) => e.type)).toEqual(['accepted', 'status', 'delta', 'done'])
   })
+  it('reports heartbeat bytes as stream activity', async () => {
+    const events: ChatEvent[] = []
+    let liveChunks = 0
+    await readChatStream(response(`: waiting\n\n${clarify}`, 11), (event) => events.push(event), () => { liveChunks += 1 })
+    expect(events.map((event) => event.type)).toEqual(['accepted', 'status', 'delta', 'done'])
+    expect(liveChunks).toBeGreaterThan(events.length)
+  })
   it('ignores duplicate deltas and uses the final persisted message', async () => {
     const delta = clarify.match(/event: delta\ndata: .*\n\n/)![0]
     const events: ChatEvent[] = []

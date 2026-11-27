@@ -85,8 +85,8 @@ def model_payload(body: ModelRequest, provider: RunpodClient) -> str:
     return payload
 
 
-def make_deadline(deadline_ms: int) -> float:
-    return asyncio.get_running_loop().time() + min(deadline_ms, MAX_DEADLINE_MS) / 1_000
+def make_deadline(deadline_ms: int, maximum_ms: int = MAX_DEADLINE_MS) -> float:
+    return asyncio.get_running_loop().time() + min(deadline_ms, maximum_ms) / 1_000
 
 
 @router.post(
@@ -106,7 +106,7 @@ def make_deadline(deadline_ms: int) -> float:
 async def interpret(
     body: InterpretRequest, provider: Runpod, response: Response
 ) -> InterpretResult:
-    deadline = make_deadline(body.deadline_ms)
+    deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
     with provider.call("interpret", body.request_id) as call:
         interpretation = await provider.interpret(
             prompts.INTERPRET, model_payload(body, provider), call, deadline
@@ -162,7 +162,7 @@ class Composition:
 async def open_composition(
     body: ComposeRequest, provider: Runpod
 ) -> AsyncGenerator[Composition, None]:
-    deadline = make_deadline(body.deadline_ms)
+    deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
     payload = model_payload(body, provider)
     with provider.call("compose", body.request_id) as call:
         chunks = provider.stream(prompts.COMPOSE, payload, call, deadline)
@@ -291,10 +291,12 @@ def create_app(
                 yield
                 return
 
+            base_url = f"https://api.runpod.ai/v2/{config.runpod_endpoint_id}/"
+            using_queue = config.runpod_request_mode == "queue"
             async with httpx.AsyncClient(
-                base_url=f"https://api.runpod.ai/v2/{config.runpod_endpoint_id}/openai/v1/",
+                base_url=base_url if using_queue else base_url + "openai/v1/",
                 headers={"Authorization": f"Bearer {config.runpod_api_key.get_secret_value()}"},
-                timeout=httpx.Timeout(MAX_DEADLINE_MS / 1_000, connect=5.0),
+                timeout=httpx.Timeout(8.0 if using_queue else MAX_DEADLINE_MS / 1_000, connect=5.0),
                 limits=httpx.Limits(max_connections=config.runpod_max_concurrency),
                 transport=runpod_transport,
             ) as client:

@@ -118,7 +118,7 @@ components:
     DeadlineMs:
       type: integer
       minimum: 1
-      description: Остаток дедлайна хода. Лимит FastAPI составляет 180 000 мс и включает очередь и холодный запуск.
+      description: Остаток дедлайна хода. Лимит FastAPI включает очередь и холодный запуск. Для прямого OpenAI-маршрута он составляет 180 000 мс, для режима очереди Runpod — 1 200 000 мс.
     FaqReviewRequest:
       type: object
       additionalProperties: false

@@ -505,6 +505,7 @@ async def test_waiting_for_provider_slot_counts_toward_deadline(settings, caplog
 @pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])
 async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asgi_version, caplog):
     caplog.set_level("INFO", logger=USAGE_LOGGER)
+
     class HangingStream(httpx.AsyncByteStream):
         closed = False
 
@@ -555,3 +556,68 @@ async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asg
 
     await disconnect()
     assert_usage_record(caplog, "compose", "error", None, "req-compose")
+
+
+async def test_queue_interprets_and_composes_with_usage(settings, monkeypatch, caplog):
+    settings.runpod_request_mode = "queue"
+    settings.runpod_response_format = "json_schema"
+    monkeypatch.setattr("app.runpod.POLL_SECONDS", 0)
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+    requests = []
+    completions = [
+        json.dumps(RESULT),
+        json.dumps({"text": "До 50 пользователей.", "fact_ids": ["seats"]}),
+    ]
+
+    def handler(request):
+        requests.append(request)
+        assert request.url.host == "api.runpod.ai"
+        if request.url.path.endswith("/run"):
+            body = json.loads(request.content)
+            assert body["input"]["openai_route"] == "/v1/chat/completions"
+            assert body["policy"]["ttl"] > 120_000
+            payload = body["input"]["openai_input"]
+            assert payload["stream"] is False
+            number = len(completions)
+            assert ("response_format" in payload) == (number == 2)
+            return httpx.Response(200, json={"id": f"job-{number}", "status": "IN_QUEUE"})
+        assert "/status/job-" in request.url.path
+        output = {"choices": [{"message": {"content": completions.pop(0)}}], "usage": USAGE}
+        return httpx.Response(200, json={"status": "COMPLETED", "output": [output]})
+
+    async with client_for(settings, handler) as client:
+        result = await client.post(
+            "/internal/v1/interpret", json=INTERPRET | {"deadline_ms": 960_000}, headers=AUTH
+        )
+        assert result.status_code == 200
+        assert result.json()["intent"] == "known_product"
+        result = await client.post(
+            "/internal/v1/compose", json=COMPOSE | {"deadline_ms": 960_000}, headers=AUTH
+        )
+        assert [kind for kind, _ in events(result)] == ["block", "complete"]
+    assert [request.method for request in requests] == ["POST", "GET", "POST", "GET"]
+    assert len(caplog.records) == 2
+    assert all(
+        json.loads(record.message)["usage_status"] == "reported" for record in caplog.records
+    )
+
+
+async def test_queue_expiration_cancels_only_the_submitted_job(settings, monkeypatch):
+    settings.runpod_request_mode = "queue"
+    monkeypatch.setattr("app.runpod.POLL_SECONDS", 0.2)
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/run"):
+            return httpx.Response(200, json={"id": "job-test", "status": "IN_QUEUE"})
+        assert request.url.path.endswith("/cancel/job-test")
+        return httpx.Response(200, json={"status": "CANCELLED"})
+
+    async with client_for(settings, handler) as client:
+        result = await client.post(
+            "/internal/v1/interpret", json=INTERPRET | {"deadline_ms": 50}, headers=AUTH
+        )
+    assert result.status_code == 503
+    assert result.json()["code"] == "MODEL_TIMEOUT"
+    assert paths == ["/v2/endpoint-test/run", "/v2/endpoint-test/cancel/job-test"]

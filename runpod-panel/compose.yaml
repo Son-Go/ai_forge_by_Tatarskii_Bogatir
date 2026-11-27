@@ -1,0 +1,46 @@
+name: forge-runpod-panel
+
+services:
+  panel:
+    build: .
+    user: "10001:10001"
+    ports:
+      - "127.0.0.1:${PANEL_PORT:-8765}:8000"
+    environment:
+      PANEL_ENDPOINT_ID: ${PANEL_ENDPOINT_ID:?Set PANEL_ENDPOINT_ID}
+      PANEL_MANAGEMENT_KEY: ${PANEL_MANAGEMENT_KEY:?Set PANEL_MANAGEMENT_KEY}
+      PANEL_OPERATOR_USER: ${PANEL_OPERATOR_USER:-operator}
+      PANEL_OPERATOR_PASSWORD: ${PANEL_OPERATOR_PASSWORD:?Set PANEL_OPERATOR_PASSWORD}
+      PANEL_BILLING_KEY: ${PANEL_BILLING_KEY:-}
+      PANEL_INFERENCE_KEY: ${PANEL_INFERENCE_KEY:-}
+      PANEL_MODEL: ${PANEL_MODEL:-}
+      PANEL_PROBE_TIMEOUT_SECONDS: ${PANEL_PROBE_TIMEOUT_SECONDS:-960}
+      PANEL_ACTIVE_USD_PER_WORKER_HOUR: ${PANEL_ACTIVE_USD_PER_WORKER_HOUR:-}
+      PANEL_FLEX_USD_PER_WORKER_HOUR: ${PANEL_FLEX_USD_PER_WORKER_HOUR:-}
+      PANEL_RATE_SOURCE: ${PANEL_RATE_SOURCE:-}
+      PANEL_ML_CONCURRENCY: ${PANEL_ML_CONCURRENCY:-}
+      PANEL_GRAFANA_URL: ${PANEL_GRAFANA_URL:-}
+    volumes:
+      - state:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 192m
+    cpus: 0.50
+    pids_limit: 64
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 12s
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 2m
+        max-file: "2"
+
+volumes:
+  state:

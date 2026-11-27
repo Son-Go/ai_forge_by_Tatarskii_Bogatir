@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import AsyncExitStack, contextmanager
 from time import perf_counter
@@ -16,6 +18,8 @@ from .schemas import Interpretation
 from .telemetry import RunpodCall, Stage
 
 logger = logging.getLogger("uvicorn.error").getChild("runpod")
+POLL_SECONDS = 2
+PENDING = {"IN_QUEUE", "IN_PROGRESS"}
 
 
 class Message(BaseModel):
@@ -73,7 +77,9 @@ class RunpodClient:
         finally:
             call.record()
 
-    def payload(self, system_prompt: str, user_payload: str, *, stream: bool) -> dict[str, Any]:
+    def payload(
+        self, system_prompt: str, user_payload: str, *, stream: bool, compose: bool = False
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.settings.runpod_model,
             "messages": [
@@ -83,11 +89,11 @@ class RunpodClient:
             "stream": stream,
             "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False},
-            "max_tokens": 1_024 if stream else 768,
+            "max_tokens": 1_024 if compose else 768,
         }
         if stream:
             body["stream_options"] = {"include_usage": True}
-        elif self.settings.runpod_response_format == "json_schema":
+        elif not compose and self.settings.runpod_response_format == "json_schema":
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -96,6 +102,85 @@ class RunpodClient:
                 },
             }
         return body
+
+    @staticmethod
+    def completion_text(content: bytes) -> str:
+        completion = validate_model_json(Completion, content, "completion_schema")
+        if len(completion.choices) != 1:
+            raise InvalidModelOutput("unexpected_completion_choices")
+        choice = completion.choices[0]
+        if choice.finish_reason not in (None, "stop"):
+            raise InvalidModelOutput("incomplete_completion")
+        if not choice.message.content:
+            raise InvalidModelOutput("empty_completion")
+        return choice.message.content
+
+    @staticmethod
+    def job_data(response: httpx.Response) -> dict:
+        try:
+            data = response.json()
+        except ValueError:
+            raise InvalidModelOutput("invalid_job_response") from None
+        if not isinstance(data, dict) or not isinstance(data.get("status"), str):
+            raise InvalidModelOutput("invalid_job_status")
+        return data
+
+    async def queued_completion(
+        self, payload: dict, call: RunpodCall, deadline: float
+    ) -> tuple[bytes, str]:
+        headers = {"X-Request-Id": call.request_id}
+        remaining_ms = int((deadline - asyncio.get_running_loop().time()) * 1000)
+        if remaining_ms <= 0:
+            raise TimeoutError
+        response = await self.http.post(
+            "run",
+            headers=headers,
+            json={
+                "input": {"openai_route": "/v1/chat/completions", "openai_input": payload},
+                "policy": {"ttl": max(10_000, remaining_ms)},
+            },
+        )
+        response.raise_for_status()
+        data = self.job_data(response)
+        job_id = data.get("id")
+        if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+            raise InvalidModelOutput("invalid_job_id")
+        try:
+            while data["status"] in PENDING:
+                await asyncio.sleep(POLL_SECONDS)
+                try:
+                    response = await self.http.get(f"status/{job_id}", headers=headers)
+                except httpx.RequestError:
+                    continue
+                if response.status_code == 429 or 500 <= response.status_code < 600:
+                    continue
+                response.raise_for_status()
+                data = self.job_data(response)
+        finally:
+            if data["status"] in PENDING:
+                # A disconnected turn has no consumer. Cancel only its confirmed job.
+                with CancelScope(shield=True):
+                    try:
+                        async with asyncio.timeout(2):
+                            await self.http.post(f"cancel/{job_id}", headers=headers)
+                    except (httpx.HTTPError, TimeoutError):
+                        pass
+        status = data["status"]
+        if status == "TIMED_OUT":
+            raise TimeoutError
+        if status != "COMPLETED":
+            logger.warning("Runpod job did not complete request_id=%s", call.request_id)
+            raise ServiceError("MODEL_UNAVAILABLE", "RunPod не смог обработать запрос.")
+        output = data.get("output")
+        if isinstance(output, list) and len(output) == 1:
+            output = output[0]
+        if not isinstance(output, dict):
+            raise InvalidModelOutput("invalid_job_output")
+        content = json.dumps(output).encode()
+        call.read_usage(content)
+        if output.get("error"):
+            raise ServiceError("MODEL_UNAVAILABLE", "RunPod не смог обработать запрос.")
+        return content, job_id
 
     async def interpret(
         self, system_prompt: str, user_payload: str, call: RunpodCall, deadline: float
@@ -106,28 +191,25 @@ class RunpodClient:
         with translate_runpod_errors(request_id):
             async with asyncio.timeout_at(deadline), self.slots:
                 call.started = True
-                response = await self.http.post(
-                    "chat/completions",
-                    json=payload,
-                    headers={"X-Request-Id": request_id},
-                )
-                call.read_usage(response.content)
-                response.raise_for_status()
-                completion = validate_model_json(Completion, response.content, "completion_schema")
-                if len(completion.choices) != 1:
-                    raise InvalidModelOutput("unexpected_completion_choices")
-                choice = completion.choices[0]
-                if choice.finish_reason not in (None, "stop"):
-                    raise InvalidModelOutput("incomplete_completion")
-                if not choice.message.content:
-                    raise InvalidModelOutput("empty_completion")
+                if self.settings.runpod_request_mode == "queue":
+                    content, provider_id = await self.queued_completion(payload, call, deadline)
+                else:
+                    response = await self.http.post(
+                        "chat/completions",
+                        json=payload,
+                        headers={"X-Request-Id": request_id},
+                    )
+                    content = response.content
+                    call.read_usage(content)
+                    response.raise_for_status()
+                    provider_id = response.headers.get("x-request-id", "")[:128]
                 result = validate_model_json(
-                    Interpretation, choice.message.content, "interpretation_schema"
+                    Interpretation, self.completion_text(content), "interpretation_schema"
                 )
         logger.info(
             "Runpod interpret request_id=%s provider_id=%r elapsed_ms=%.0f",
             request_id,
-            response.headers.get("x-request-id", "")[:128],
+            provider_id,
             (perf_counter() - started) * 1_000,
         )
         return result
@@ -136,7 +218,16 @@ class RunpodClient:
         self, system_prompt: str, user_payload: str, call: RunpodCall, deadline: float
     ) -> AsyncGenerator[str, None]:
         request_id = call.request_id
-        payload = self.payload(system_prompt, user_payload, stream=True)
+        if self.settings.runpod_request_mode == "queue":
+            payload = self.payload(system_prompt, user_payload, stream=False, compose=True)
+            with translate_runpod_errors(request_id):
+                async with asyncio.timeout_at(deadline), self.slots:
+                    call.started = True
+                    content, _ = await self.queued_completion(payload, call, deadline)
+                    text = self.completion_text(content)
+            yield text
+            return
+        payload = self.payload(system_prompt, user_payload, stream=True, compose=True)
         started = perf_counter()
         resources = AsyncExitStack()
         validation_error = None
