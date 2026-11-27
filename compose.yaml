@@ -3,3 +3,4 @@ include:
       - ./infra/compose.yaml
       - ./infra/compose.ml.yaml
       - ./infra/compose.monitoring.yaml
+  - ./runpod-panel/compose.yaml

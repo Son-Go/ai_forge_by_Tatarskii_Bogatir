@@ -1,6 +1,6 @@
 # Закрытая панель Runpod Serverless
 
-Панель управляет одним существующим эндпоинтом. Она работает в Compose-проекте `forge-runpod-panel` со своей сетью и томом `state`. Контейнер запускается от непривилегированного пользователя, слушает loopback VPS через опубликованный порт и ограничен 0,5 CPU, 192 МиБ RAM и 64 процессами. Caddy и основной Compose о панели не знают.
+Панель управляет одним существующим эндпоинтом. Корневой Compose включает сервис `panel` с профилем `runpod-panel`, собственной сетью и томом `runpod-panel-state`. Контейнер запускается от непривилегированного пользователя, слушает loopback VPS через опубликованный порт и ограничен 0,5 CPU, 192 МиБ RAM и 64 процессами.
 
 ## Настройка на VPS
 
@@ -11,7 +11,7 @@
 openssl rand -hex 32
 ```
 
-Заполните файл на сервере. Используйте отдельный пароль оператора и ключи Runpod с минимальными правами для аккаунта или команды, которой принадлежит эндпоинт. Compose передаёт эти настройки процессу панели. Доступ к Docker на VPS даёт доступ к окружению контейнера.
+Заполните файл на сервере. Используйте отдельный пароль оператора и ключи Runpod с минимальными правами для аккаунта или команды, которой принадлежит эндпоинт. Compose передаёт эти настройки процессу панели. Добавьте `COMPOSE_PROFILES=runpod-panel` в корневой `.env`. Если в нём уже заданы профили, добавьте `runpod-panel` через запятую.
 
 | Переменная | Назначение |
 | --- | --- |
@@ -29,13 +29,27 @@ openssl rand -hex 32
 
 ## Запуск, доступ, обновление и остановка
 
-Проверьте, что порт свободен и VPS может обращаться к `api.runpod.io` и `api.runpod.ai` по HTTPS. Запустите отдельный проект.
+Проверьте, что порт свободен и VPS может обращаться к `api.runpod.io` и `api.runpod.ai` по HTTPS. Запустите Compose из корня репозитория.
 
 ```sh
-docker compose --env-file runpod-panel/.env -f runpod-panel/compose.yaml -p forge-runpod-panel config --quiet
-docker compose --env-file runpod-panel/.env -f runpod-panel/compose.yaml -p forge-runpod-panel up -d --build --wait
-docker compose --env-file runpod-panel/.env -f runpod-panel/compose.yaml -p forge-runpod-panel ps
+docker compose config --quiet
+docker compose up -d --build --wait
+docker compose ps
 curl --fail http://127.0.0.1:8765/healthz
+```
+
+При переходе со старого отдельного проекта `forge-runpod-panel` остановите его перед первым запуском общего стека. Чтобы перенести состояние из прежнего тома в новый пустой том, выполните команды из корня после настройки профиля.
+
+```sh
+docker volume inspect forge-runpod-panel_state >/dev/null &&
+  docker compose --profile runpod-panel -f runpod-panel/compose.yaml -p forge-runpod-panel down &&
+  docker compose build panel &&
+  docker compose create panel &&
+  docker run --rm --network none --user 0 \
+    --volumes-from "$(docker compose ps -a -q panel)" \
+    --mount type=volume,src=forge-runpod-panel_state,dst=/old,readonly \
+    "$(docker compose images -q panel)" \
+    sh -ec 'test -z "$(ls -A /data)"; cp -a /old/. /data/'
 ```
 
 Откройте SSH-туннель на машине оператора. Второе перенаправление нужно для ссылки на Grafana. Если порт на VPS отличается, обновите правую часть нужного перенаправления.
@@ -49,7 +63,7 @@ ssh -N -o ExitOnForwardFailure=yes \
 Откройте [панель](http://127.0.0.1:8765/) и войдите под учётной записью оператора. Держите публикацию на loopback и используйте SSH для доступа. После обновления исходников повторите `up -d --build --wait`. Штатная остановка сохраняет том.
 
 ```sh
-docker compose --env-file runpod-panel/.env -f runpod-panel/compose.yaml -p forge-runpod-panel stop
+docker compose down
 ```
 
 При остановленной панели таймер ждёт следующего запуска. Если срок уже прошёл, панель сразу перечитает конфигурацию Runpod и попытается подтвердить возврат. Если панель нужно надолго выключить, а прогрев активен, сначала проверьте настроенный минимум воркеров. Сохраняйте том при обновлениях и резервном копировании. Перед сменой `PANEL_ENDPOINT_ID` завершите прогрев старого эндпоинта.
@@ -74,29 +88,22 @@ uv run --directory runpod-panel --locked pytest -q
 Для браузерной проверки установите зависимости в `frontend/` по его README. Запустите контейнер панели с локальным имитатором из `tests/`. Все ключи и пароли в файлах тестового стенда синтетические. Команды ниже запускаются из корня.
 
 ```sh
-panel_test() {
-  PANEL_FIXTURES="$PWD/runpod-panel/tests" docker compose \
-    --env-file runpod-panel/tests/panel.env \
-    -f runpod-panel/compose.yaml -f runpod-panel/tests/panel.compose.yaml \
-    -p forge-runpod-panel-check "$@"
-}
 stack_test() {
-  STACK_FIXTURES="$PWD/runpod-panel/tests/stack" docker compose \
+  STACK_FIXTURES="$PWD/runpod-panel/tests/stack" \
+  PANEL_FIXTURES="$PWD/runpod-panel/tests" docker compose --profile runpod-panel \
     --env-file runpod-panel/tests/stack/stack.env \
+    --env-file runpod-panel/tests/panel.env \
     -f compose.yaml -f runpod-panel/tests/stack/compose.yaml \
+    -f runpod-panel/tests/panel.compose.yaml \
     -p forge-panel-stack-check "$@"
 }
 
-docker compose --env-file infra/.env.example config --format json | shasum -a 256
-panel_test up -d --build --wait
-node runpod-panel/tests/browser.mjs
 stack_test up -d --build --wait
+node runpod-panel/tests/browser.mjs
 python3 runpod-panel/tests/stack_smoke.py on
-panel_test stop
+stack_test stop panel
 python3 runpod-panel/tests/stack_smoke.py off
-docker compose --env-file infra/.env.example config --format json | shasum -a 256
 stack_test down
-panel_test down
 ```
 
 Укажите `PANEL_CHROME_BIN`, если используете установленный Google Chrome вместо Chromium Playwright. `PANEL_SCREENSHOTS` задаёт каталог снимков проверки. Чат проверяется с синтетическим XML-каталогом через действующие Caddy, Spring Boot и ML-сервис. Подменены только ответы Runpod. Grafana через Loki проверяется по `request_id` для этапов интерпретации и композиции.

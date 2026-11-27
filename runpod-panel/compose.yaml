@@ -2,15 +2,16 @@ name: forge-runpod-panel
 
 services:
   panel:
+    profiles: [runpod-panel]
     build: .
     user: "10001:10001"
     ports:
       - "127.0.0.1:${PANEL_PORT:-8765}:8000"
     environment:
-      PANEL_ENDPOINT_ID: ${PANEL_ENDPOINT_ID:?Set PANEL_ENDPOINT_ID}
-      PANEL_MANAGEMENT_KEY: ${PANEL_MANAGEMENT_KEY:?Set PANEL_MANAGEMENT_KEY}
+      PANEL_ENDPOINT_ID: ${PANEL_ENDPOINT_ID:-}
+      PANEL_MANAGEMENT_KEY: ${PANEL_MANAGEMENT_KEY:-}
       PANEL_OPERATOR_USER: ${PANEL_OPERATOR_USER:-operator}
-      PANEL_OPERATOR_PASSWORD: ${PANEL_OPERATOR_PASSWORD:?Set PANEL_OPERATOR_PASSWORD}
+      PANEL_OPERATOR_PASSWORD: ${PANEL_OPERATOR_PASSWORD:-}
       PANEL_BILLING_KEY: ${PANEL_BILLING_KEY:-}
       PANEL_INFERENCE_KEY: ${PANEL_INFERENCE_KEY:-}
       PANEL_MODEL: ${PANEL_MODEL:-}
@@ -21,7 +22,8 @@ services:
       PANEL_ML_CONCURRENCY: ${PANEL_ML_CONCURRENCY:-}
       PANEL_GRAFANA_URL: ${PANEL_GRAFANA_URL:-}
     volumes:
-      - state:/data
+      - runpod-panel-state:/data
+    networks: [runpod-panel]
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -43,4 +45,7 @@ services:
         max-file: "2"
 
 volumes:
-  state:
+  runpod-panel-state:
+
+networks:
+  runpod-panel:
