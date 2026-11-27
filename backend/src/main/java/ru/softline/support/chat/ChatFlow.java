@@ -153,10 +153,11 @@ class ChatFlow {
         Map<String, Object> old = store.requirements(turn);
         String activeHandoff = store.activeHandoffReason(turn.sessionId());
         String supportTopic = store.supportTopic(turn.sessionId());
-        Reply direct = activeHandoff == null ? planner.explicitHandoff(turn.userText())
+        Reply direct = activeHandoff == null ? planner.explicitHandoff(turn.userText(), old)
                 : Reply.handoff(activeHandoff, "Сообщение добавлено к обращению. Менеджер увидит его в этом диалоге.");
         if (direct == null) direct = planner.commercialSupport(turn.userText(), supportTopic, null);
         if (direct == null) direct = store.directPricingReply(turn);
+        if (direct == null) direct = planner.commercialGuide(turn.userText());
         if (direct != null) {
             finishDirect(turn, emitter, timing, old, direct);
             return;
@@ -187,20 +188,25 @@ class ChatFlow {
             return;
         }
         long searchStarted = System.nanoTime();
-        Map<String, Object> next;
+        Map<String, Object> saved;
         Reply reply;
-        Reply approvedFaq;
         try {
-            next = planner.apply(old, interpretation, turn.userText());
             send(emitter, "status", Map.of("stage", "searching"));
-            approvedFaq = planner.faqAnswer(turn, interpretation, next);
-            reply = approvedFaq == null ? planner.plan(turn, interpretation, next) : approvedFaq;
+            if (planner.isProductQuestion(turn.userText(), interpretation)) {
+                saved = old;
+                reply = planner.question(turn, interpretation, old);
+            } else {
+                saved = planner.apply(old, interpretation, turn.userText());
+                reply = planner.plan(turn, interpretation, saved);
+            }
         } finally {
             timing.searchMs = elapsedMillis(searchStarted);
         }
         Set<String> sent = new HashSet<>();
         String promptVersion = null;
-        if (approvedFaq == null && ("answer".equals(reply.outcome()) || "recommend".equals(reply.outcome()))) {
+        // Only answers that combine several excerpts need model composition.
+        if ("answer".equals(reply.outcome()) && reply.cards().isEmpty() && reply.facts().size() > 1
+                && reply.sources().size() > 1) {
             send(emitter, "status", Map.of("stage", "generating"));
             try {
                 long compositionStarted = System.nanoTime();
@@ -223,7 +229,6 @@ class ChatFlow {
                 if (sent.add(fact.id())) append(turn, emitter, fact.text(), sent.size() > 1, timing);
             }
         }
-        Map<String, Object> saved = "product_question".equals(interpretation.intent()) ? old : next;
         Done answer = store.complete(turn, reply, saved, !old.equals(saved), validVersion(interpretation.modelVersion()),
                 validVersion(promptVersion));
         send(emitter, "done", answer);

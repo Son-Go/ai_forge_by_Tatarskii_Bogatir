@@ -120,14 +120,16 @@ def run(origin, managers, metrics_url=None):
     assert call(case + "/messages", method="POST", token=manager, body=new_reply, expected=409)[1]["code"] == "HANDOFF_RESOLVED"
     assert sum(message["id"] == reply["message_id"] for message in call(path, cookie=cookie)[1]["messages"]) == 1
 
-    assert "event:status" not in send(path, cookie, "Можно заказать продукт, которого нет в каталоге?")
+    send(path, cookie, "Можно заказать продукт, которого нет в каталоге?")
+    assert handoff(path, cookie)["handoff_id"] == queued["handoff_id"]
+    assert "event:status" not in send(path, cookie, "Проверьте возможность поставки ExampleMail Enterprise.")
     new_case = handoff(path, cookie)
     assert new_case["reason"] == "off_catalog_order" and new_case["status"] == "queued"
     assert new_case["handoff_id"] != queued["handoff_id"]
     archived = call(case, token=manager)[1]["messages"]
     assert archived[-1] == first
     if metrics_url:
-        assert accepted_messages(metrics_url) == before + 3
+        assert accepted_messages(metrics_url) == before + 4
         print("PASS: new messages without model calls counted once, including saved-turn replay")
     print("PASS: permissions, concurrent claim, client follow-up, manager reply/retry, resolve, and off-catalog order")
 

@@ -14,6 +14,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import uuid
 
+QUESTION = "Как настроить тестовую синхронизацию?"
+
 
 class MockMl(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -25,8 +27,8 @@ class MockMl(BaseHTTPRequestHandler):
             self.server.interpret_budgets.append(request["deadline_ms"])
             self.wait_if_cold("interpret", request)
             payload = json.dumps({
-                "intent": "known_product",
-                "product_query": "DemoMail",
+                "intent": "product_question",
+                "product_query": QUESTION,
                 "updates": [],
                 "clarification_candidates": [],
                 "model_version": "fixture",
@@ -95,6 +97,14 @@ def run(args):
     </offer>
 </offers></shop></yml_catalog>
 """.strip(), encoding="utf-8")
+        knowledge = Path(tmp, "knowledge.json")
+        knowledge.write_text(json.dumps([{
+            "source_url": "https://docs.softline.ru/synthetic-sse", "title": "Тестовая справка",
+            "fetched_at": "2026-11-26T00:00:00Z", "version": "fixture", "chunks": [
+                {"text": "Чтобы настроить тестовую синхронизацию, откройте настройки."},
+                {"text": "Чтобы настроить тестовую синхронизацию, выберите профиль."},
+            ],
+        }]))
         env = {
             **os.environ,
             "SERVER_PORT": origin.rsplit(":", 1)[1],
@@ -103,7 +113,7 @@ def run(args):
             "SPRING_DATASOURCE_URL": args.jdbc_url,
             "SPRING_DATASOURCE_USERNAME": args.db_user,
             "CATALOG_FEED_FILE": str(feed),
-            "CATALOG_KNOWLEDGE_FILE": "",
+            "CATALOG_KNOWLEDGE_FILE": str(knowledge),
             "CHAT_PUBLIC_ORIGIN": origin,
             "CHAT_TURN_TIMEOUT_MS": "3000",
             "CHAT_COLD_TURN_TIMEOUT_MS": "3000",
@@ -129,7 +139,7 @@ def run(args):
                     session = json.load(response)["session_id"]
                     headers["Cookie"] = response.headers["Set-Cookie"].split(";", 1)[0]
                 url = f"{origin}/api/v1/sessions/{session}"
-                body = json.dumps({"client_message_id": str(uuid.uuid4()), "text": "DemoMail"}).encode()
+                body = json.dumps({"client_message_id": str(uuid.uuid4()), "text": QUESTION}).encode()
                 started = time.monotonic()
                 with urlopen(Request(url + "/messages", body, headers), timeout=20) as response:
                     stream = response.read().decode()
@@ -145,7 +155,7 @@ def run(args):
                     elapsed = time.monotonic() - started
                     assert events[-1] == "done" and answer["status"] == "complete", events
                     assert timing["budget"] == "cold" and timing["budget_ms"] == "180000", timing
-                    assert timing["outcome"] == "recommend" and timing["error_code"] == "null", timing
+                    assert timing["outcome"] == "answer" and timing["error_code"] == "null", timing
                     assert int(timing[f"{args.cold_stage}_ms"]) >= args.cold_delay * 1000, timing
                     assert int(timing["first_delta_ms"]) >= args.cold_delay * 1000, timing
                     assert args.cold_delay <= elapsed < 180
@@ -154,7 +164,7 @@ def run(args):
                     assert any(line.startswith(":") and "waiting" in line for line in stream.splitlines())
                     for idle_seconds, mode, lower, upper in ((0, "warm", 85_000, 90_000), (2.2, "cold", 175_000, 180_000)):
                         time.sleep(idle_seconds)
-                        followup = json.dumps({"client_message_id": str(uuid.uuid4()), "text": "DemoMail"}).encode()
+                        followup = json.dumps({"client_message_id": str(uuid.uuid4()), "text": QUESTION}).encode()
                         with urlopen(Request(url + "/messages", followup, headers), timeout=10) as response:
                             followup_stream = response.read().decode()
                         assert "event:done" in followup_stream

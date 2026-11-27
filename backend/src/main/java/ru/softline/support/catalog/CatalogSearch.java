@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -27,6 +28,11 @@ public class CatalogSearch {
         FROM knowledge_chunks c JOIN knowledge_documents d USING (document_id)
         WHERE NOT EXISTS (SELECT 1 FROM knowledge_documents newer WHERE newer.source_url = d.source_url
             AND (newer.fetched_at, newer.document_id) > (d.fetched_at, d.document_id))
+        """;
+    private static final String ALIASES = """
+        jsonb_path_query_array(o.raw_attributes, '$."Алиас"[*]')
+        || jsonb_path_query_array(o.raw_attributes, '$."Альтернативное название"[*]')
+        || jsonb_path_query_array(o.raw_attributes, '$."Синонимы"[*]')
         """;
     private final JdbcClient db;
     private final ObjectMapper json;
@@ -67,6 +73,37 @@ public class CatalogSearch {
                 .query(this::offer).list();
     }
 
+    public List<Offer> findProduct(UUID version, String query) {
+        if (query == null || query.isBlank()) return List.of();
+        String key = productKey(query);
+        if (key.isEmpty()) return List.of();
+        List<Offer> matches = db.sql(OFFER_COLUMNS + """
+            WHERE o.import_id = :version AND (
+                o.offer_id = :query OR lower(o.vendor_code) = lower(:query)
+                OR strpos(' ' || trim(regexp_replace(replace(lower(o.name), 'ё', 'е'), '[^[:alnum:]+#]+', ' ', 'g'))
+                    || ' ', :key) > 0
+                OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(%s) AS alias WHERE lower(alias) = lower(:query)))
+            ORDER BY (o.offer_id = :query) DESC, (lower(o.vendor_code) = lower(:query)) DESC NULLS LAST,
+                (lower(o.name) = lower(:query)) DESC, length(o.name), o.offer_id
+            LIMIT 1000
+            """.formatted(ALIASES)).param("version", version).param("query", query)
+                .param("key", " " + key + " ").query(this::offer).list();
+        List<Offer> byId = matches.stream().filter(offer -> offer.id().equals(query)).toList();
+        if (!byId.isEmpty()) return byId;
+        List<Offer> byCode = matches.stream().filter(offer -> query.equalsIgnoreCase(offer.vendorCode())).toList();
+        return byCode.isEmpty() ? matches : byCode;
+    }
+
+    public static boolean mentions(String text, String value) {
+        if (text == null || value == null) return false;
+        String expected = productKey(value);
+        return !expected.isEmpty() && (" " + productKey(text) + " ").contains(" " + expected + " ");
+    }
+
+    private static String productKey(String value) {
+        return value.toLowerCase(Locale.ROOT).replace('ё', 'е').replaceAll("[^\\p{L}\\p{N}+#]+", " ").strip();
+    }
+
     public List<Knowledge> knowledge(String query) {
         if (query == null || query.isBlank()) return List.of();
         return db.sql(LATEST_KNOWLEDGE + """
@@ -101,9 +138,29 @@ public class CatalogSearch {
             """).param("after_sale:" + topic).query(CatalogSearch::knowledgeRow).optional();
     }
 
+    public Optional<Knowledge> guide(String section) {
+        return db.sql(LATEST_KNOWLEDGE + """
+            AND c.section = ? ORDER BY d.fetched_at DESC, c.chunk_id LIMIT 1
+            """).param(section).query(CatalogSearch::knowledgeRow).optional();
+    }
+
+    public List<Knowledge> productKnowledge(String product, String subject) {
+        return db.sql(LATEST_KNOWLEDGE + """
+            AND to_tsvector('russian', d.title || ' ' || c.body) @@ phraseto_tsquery('russian', :product)
+            AND to_tsvector('russian', c.body) @@ websearch_to_tsquery('russian', :subject)
+            ORDER BY ts_rank(to_tsvector('russian', c.body), websearch_to_tsquery('russian', :subject)) DESC,
+                c.chunk_id LIMIT 3
+            """).param("product", product).param("subject", subject).query(CatalogSearch::knowledgeRow).list();
+    }
+
     public static boolean canSelect(JsonNode card) {
         String status = card.path("availability").asText();
         return "available".equals(status) || "unavailable".equals(status) && card.path("price").isObject();
+    }
+
+    public static boolean canRecommend(Offer offer) {
+        return "available".equals(offer.availability()) || "unavailable".equals(offer.availability())
+                && offer.price() != null && offer.price().signum() > 0 && offer.currency() != null;
     }
 
     public JsonNode card(Offer offer) {

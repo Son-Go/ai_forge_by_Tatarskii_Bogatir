@@ -5,27 +5,42 @@ import static ru.softline.support.chat.ChatTypes.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 import ru.softline.support.catalog.CatalogSearch;
+import ru.softline.support.catalog.CatalogSearch.Knowledge;
 import ru.softline.support.catalog.CatalogSearch.Offer;
 
 @Component
 class ReplyPlanner {
-    private static final Pattern DEFERRAL_REQUEST = Pattern.compile(
-            "(?U)\\b(?:хочу|хотим|просим|прошу|нужн[аоы]?|можно|дайте|предоставьте|оформите)"
-                    + "\\b[^.!?,;]{0,60}\\b(?:отсроч[а-я]*|(?:оплатить|заплатить|платить) (?:позже|после поставки))\\b"
-                    + "|\\bотсроч[а-я]*(?: (?:нам|мне))? нужн[аоы]\\b");
-    private static final Pattern NO_DEFERRAL = Pattern.compile(
-            "(?U)\\b(?:отсроч[а-я]*(?: (?:нам|мне|больше|сейчас)){0,2} не (?:нужн[аоы]?|требуется)"
-                    + "|не (?:нужн[аоы]?|надо|просим|прошу|хочу|хотим)(?: (?:нам|мне))? отсроч[а-я]*"
-                    + "|(?:без|отказываемся от|отказываюсь от) отсроч[а-я]*"
-                    + "|не (?:хочу|хотим|нужно|надо) (?:оплатить|заплатить|платить) позже)\\b");
+    private static final Pattern SOFT_REGISTRY = Pattern.compile(
+            "(?U)\\b(?:желательно|предпочтительно|по возможности|если есть)(?: [\\p{L}]+){0,5} "
+            + "(?:реестр[а-я]*|российск[а-я]*)\\b");
+    private static final Pattern STRICT_REGISTRY = Pattern.compile(
+            "(?U)\\b(?:обязательно|только|строго|непременно)(?: [\\p{L}]+){0,5} "
+            + "(?:реестр[а-я]*|российск[а-я]*)\\b");
+    private static final Pattern QUESTION_WORD = Pattern.compile(
+            "(?U)\\b(?:как|какой|какая|какие|какова|где|можно ли|нужно ли|работает ли|совместим[аоы]? ли|"
+            + "подходит ли|подойдет ли|поддерживает ли|сколько стоит)\\b");
+    private static final Pattern PRODUCT_REFERENCE = Pattern.compile(
+            "(?iuU)\\b(?:он|она|оно|они|его|не[её]|этот|эта|это|этого|ранее выбранн[а-я]*)\\b");
+    private static final Pattern OS = Pattern.compile("(?U)\\b(astra linux|linux|windows|macos|mac os(?: x)?|android|ios)\\b");
+    private static final Pattern SUPPORT_PROCEDURE = Pattern.compile(
+            "(?U)\\b(?:как (?:вернуть|оформить|сделать|доставля[а-я]+|активировать)|"
+            + "можно ли (?:вернуть|оформить)|какие (?:условия|правила))\\b");
+    private static final Pattern OWN_PURCHASE = Pattern.compile(
+            "(?U)\\b(?:мой|моя|мою|моему|моей|наш|наша|нашу|у меня|у нас|купил[аи]?)\\b");
     private static final Map<String, String> QUESTIONS = Map.of(
             "product_name", "Как называется продукт? Если знаете артикул, укажите его.",
             "edition", "Какую редакцию продукта вы хотите подобрать?",
@@ -37,6 +52,11 @@ class ReplyPlanner {
             "budget_rub", "Какой у вас бюджет?",
             "domestic_required", "Нужна ли запись в реестре российского ПО?",
             "use_case", "Какую задачу должно решать ПО?");
+    private static final Map<String, String> FIELD_LABELS = Map.of(
+            "edition", "редакцию", "license_kind", "тип лицензии", "seats", "число пользователей",
+            "license_term_months", "срок лицензии", "platform", "совместимость с нужной платформой",
+            "deployment", "способ развёртывания", "budget_rub", "цену в пределах бюджета",
+            "domestic_required", "запись в реестре российского ПО");
     private final CatalogSearch catalog;
     private final FaqStore faq;
 
@@ -56,11 +76,18 @@ class ReplyPlanner {
             } else if ("set".equals(update.op()) && update.evidence() != null && !update.evidence().isBlank()
                     && normalize(text).contains(normalize(update.evidence()))) {
                 Object value = value(field, update.value());
-                if (value != null) changes.put(field, value);
+                if (value != null && !(Boolean.TRUE.equals(value) && "domestic_required".equals(field)
+                        && SOFT_REGISTRY.matcher(normalize(text)).find() && !STRICT_REGISTRY.matcher(normalize(text)).find())) {
+                    changes.put(field, value);
+                }
             }
         }
-        if (!"product_question".equals(input.intent()) && changes.get("product_name") != null
-                && !Objects.equals(old.get("product_name"), changes.get("product_name"))) {
+        if ("needs_solution".equals(input.intent()) && changes.get("use_case") != null
+                && !Objects.equals(old.get("use_case"), changes.get("use_case")) && changes.get("product_name") == null) {
+            next.remove("product_name");
+            next.remove("edition");
+        }
+        if (changes.get("product_name") != null && !Objects.equals(old.get("product_name"), changes.get("product_name"))) {
             next.remove("edition");
         }
         changes.forEach((field, value) -> {
@@ -69,9 +96,9 @@ class ReplyPlanner {
         return next;
     }
 
-    Reply explicitHandoff(String message) {
-        String text = normalize(message);
-        if (!NO_DEFERRAL.matcher(text).find() && DEFERRAL_REQUEST.matcher(text).find()) {
+    Reply explicitHandoff(String message, Map<String, Object> requirements) {
+        String text = FaqText.key(message);
+        if (CommercialRequest.wantsDeferral(text, false)) {
             return paymentDeferral();
         }
         boolean documentReview = (text.contains("документ") || text.contains("справк"))
@@ -82,20 +109,34 @@ class ReplyPlanner {
             return Reply.handoff("document_review", "Передали обращение менеджеру для проверки документов. "
                     + "Он ответит в этом диалоге.");
         }
-        if (text.contains("под заказ") || text.contains("вне каталога") || text.contains("вне витрины")
-                || text.contains("нет в каталоге") || text.contains("нет на сайте")
-                || text.contains("не нашел на сайте") || text.contains("не нашла на сайте")
-                || text.contains("проверьте возможность поставки") || text.contains("уточните возможность поставки")
-                || text.contains("проверьте поставку")) return offCatalog();
+        if (CommercialRequest.wantsSupplyCheck(text)) {
+            return CommercialRequest.namesSupplyTarget(text) || query(requirements.get("product_name")) != null
+                    ? offCatalog() : Reply.text("clarify", QUESTIONS.get("product_name"));
+        }
         return null;
     }
 
+    Reply commercialGuide(String message) {
+        String topic = CommercialRequest.guide(FaqText.key(message));
+        if (topic == null) return null;
+        Reply published = faq.lookup(message, null, null);
+        if (published != null) return published;
+        return catalog.guide("commercial:" + topic)
+                .map(guide -> guideReply(guide, null))
+                .orElseGet(() -> Reply.text("insufficient_data", "deferral".equals(topic)
+                        ? "В справке не удалось подтвердить общие условия отсрочки оплаты. Условия и срок нужно уточнить у менеджера."
+                        : "В справке пока нет подтверждённой информации по этому вопросу. Условия нужно уточнить у менеджера."));
+    }
+
     Reply commercialSupport(String message, String activeTopic, MlClient.Interpretation interpretation) {
-        String text = normalize(message);
-        if (!NO_DEFERRAL.matcher(text).find() && signal(interpretation, "payment_deferral", message)) {
+        String text = FaqText.key(message);
+        if (CommercialRequest.wantsDeferral(text, true) && interpretation != null && interpretation.signals() != null
+                && interpretation.signals().stream().anyMatch(signal -> grounded(signal, "payment_deferral", message)
+                        && CommercialRequest.deferralEvidence(FaqText.key(signal.evidence())))) {
             return paymentDeferral();
         }
-        if (activeTopic != null && (text.matches("(?s).*(не помогл|не сработал|не решен|не решилась|все равно не).*")
+        boolean hypothetical = CommercialRequest.hypothetical(text);
+        if (activeTopic != null && !hypothetical && (text.matches("(?s).*(не помогл|не сработал|не решен|не решилась|все равно не).*")
                 || signal(interpretation, "instruction_failed", message))) {
             return Reply.handoff("instruction_failed", "Передали обращение менеджеру. Он увидит историю и инструкцию, которую вы уже попробовали.");
         }
@@ -104,85 +145,195 @@ class ReplyPlanner {
                 || signal(interpretation, "key_delivery", message)) topic = "key_delivery";
         else if ((text.contains("ключ") || text.contains("лицензи")) && text.matches("(?s).*(не активир|ошибк[аи] активац|не удается активир).*")
                 || signal(interpretation, "key_activation", message)) topic = "key_activation";
-        else if (text.matches("(?s).*(хочу возврат|вернуть (?:товар|деньги|лицензию)|как (?:сделать|оформить) возврат|оформите возврат).*")
+        else if (text.matches("(?s).*(хочу возврат|вернуть (?:товар|деньги|лицензию)|как (?:сделать|оформить) возврат|"
+                + "оформите возврат|условия возврата).*")
                 || signal(interpretation, "refund", message)) topic = "refund";
         if (topic == null) return null;
         String selectedTopic = topic;
-        return catalog.supportGuide(topic)
-                .map(guide -> new Reply("answer", List.of(new Fact("f1", guide.text())), List.of(),
-                        List.of(catalog.source(guide)), null, selectedTopic, null)).orElse(null);
+        boolean general = hypothetical || SUPPORT_PROCEDURE.matcher(text).find() && !OWN_PURCHASE.matcher(text).find();
+        return catalog.supportGuide(topic).map(guide -> guideReply(guide, general ? null : selectedTopic)).orElse(null);
+    }
+
+    private Reply guideReply(Knowledge guide, String supportTopic) {
+        return new Reply("answer", List.of(new Fact("f1", guide.text())), List.of(),
+                List.of(catalog.source(guide)), null, supportTopic, null);
     }
 
     static boolean signal(MlClient.Interpretation interpretation, String kind, String message) {
         return interpretation != null && interpretation.signals() != null && interpretation.signals().stream()
-                .anyMatch(signal -> signal != null && kind.equals(signal.kind()) && signal.evidence() != null
-                        && !signal.evidence().isBlank() && message.contains(signal.evidence()));
+                .anyMatch(signal -> grounded(signal, kind, message));
+    }
+
+    private static boolean grounded(MlClient.Signal signal, String kind, String message) {
+        return signal != null && kind.equals(signal.kind()) && signal.evidence() != null
+                && !signal.evidence().isBlank() && message.contains(signal.evidence());
     }
 
     private static Reply paymentDeferral() {
         return Reply.handoff("payment_deferral", "Передали просьбу об отсрочке оплаты менеджеру. Он ответит в этом диалоге.");
     }
 
-    Reply faqAnswer(Turn turn, MlClient.Interpretation interpretation, Map<String, Object> requirements) {
-        if (!"product_question".equals(interpretation.intent())) return null;
-        String key = FaqText.key(turn.userText());
-        return faq.lookup(turn.userText(), explicitValue(key, requirements.get("product_name")),
-                explicitValue(key, requirements.get("edition")));
+    boolean isProductQuestion(String message, MlClient.Interpretation input) {
+        return "product_question".equals(input.intent())
+                || (Facet.in(FaqText.key(message)) != null && QUESTION_WORD.matcher(FaqText.key(message)).find());
     }
 
-    private static String explicitValue(String questionKey, Object value) {
-        String text = query(value);
-        return text != null && FaqText.contains(questionKey, FaqText.key(text)) ? text : null;
+    Reply question(Turn turn, MlClient.Interpretation input, Map<String, Object> old) {
+        String text = FaqText.key(turn.userText());
+        String modelProduct = query(input.productQuery());
+        String explicit = CatalogSearch.mentions(turn.userText(), modelProduct)
+                && !QUESTION_WORD.matcher(FaqText.key(modelProduct)).find() ? modelProduct : null;
+        Facet facet = Facet.in(text);
+        boolean reference = PRODUCT_REFERENCE.matcher(text).find();
+        String savedProduct = query(old.get("product_name"));
+        String product = first(explicit, facet != null || reference ? savedProduct : null);
+        String edition = Objects.equals(product, savedProduct) ? query(old.get("edition")) : null;
+        ProductMatch match = resolveProduct(turn.catalogVersion(), product);
+        String requestedEdition = first(edition, match.edition());
+        Reply published = faq.lookup(turn.userText(), match.family(), requestedEdition);
+        if (published == null && explicit == null && reference && product != null) {
+            String subject = requestedEdition == null ? product : match.family() + " " + requestedEdition;
+            published = faq.lookup(PRODUCT_REFERENCE.matcher(turn.userText()).replaceFirst(Matcher.quoteReplacement(subject)),
+                    match.family(), requestedEdition);
+        }
+        if (published != null) return published;
+        if (product == null) {
+            if (facet != null) return Reply.text("clarify", QUESTIONS.get("product_name"));
+            String useCase = reference ? query(old.get("use_case")) : null;
+            List<Knowledge> articles = catalog.knowledge(first(useCase, first(modelProduct, turn.userText())));
+            return articles.isEmpty()
+                    ? Reply.text("insufficient_data", "Подтверждённого ответа в каталоге и справке пока нет.")
+                    : knowledgeReply(articles);
+        }
+
+        List<Offer> offers = match.offers().stream()
+                .filter(offer -> requestedEdition == null || editionMatch(offer, requestedEdition) == Match.CONFIRMED)
+                .toList();
+        if (facet == null) {
+            if (!offers.isEmpty()) {
+                return offerReply("answer", "Вот сведения о продукте из каталога. Условия указаны в карточках.",
+                        offers.stream().limit(3).toList());
+            }
+            return Reply.text("insufficient_data", "В каталоге не удалось подтвердить товар «" + product
+                    + "». Если знаете точную редакцию или артикул, напишите их.");
+        }
+
+        List<Map.Entry<Offer, String>> confirmed = offers.stream()
+                .filter(offer -> facet.value(offer) != null)
+                .map(offer -> Map.entry(offer, facet.value(offer))).toList();
+        List<String> values = confirmed.stream().map(Map.Entry::getValue).distinct().limit(2).toList();
+        boolean singleValue = values.size() == 1 && confirmed.size() == offers.size();
+        if (singleValue) {
+            String summary = "По каталогу для «" + product + "» " + facet.label + " — " + values.getFirst() + ".";
+            return offerReply("answer", summary,
+                    confirmed.stream().limit(3).map(Map.Entry::getKey).toList());
+        }
+
+        String subject = facet == Facet.PLATFORM ? first(platformIn(text), facet.search) : facet.search;
+        if (facet != Facet.PRICE) {
+            List<Knowledge> articles = catalog.productKnowledge(product, subject);
+            if (!articles.isEmpty()) return knowledgeReply(articles.subList(0, 1));
+        }
+        if (!values.isEmpty()) {
+            return offerReply("insufficient_data", "Для «" + product + "» данные по полю «" + facet.label
+                    + "» зависят от позиции или заполнены частично. Уточните редакцию или артикул.",
+                    confirmed.stream().limit(3).map(Map.Entry::getKey).toList());
+        }
+        String os = facet == Facet.PLATFORM ? platformIn(text) : null;
+        String field = os == null ? facet.missing : "совместимость с " + os;
+        return offerReply("insufficient_data", "Для «" + product + "» в текущем каталоге и справке не удалось подтвердить "
+                + field + ". Если знаете редакцию или артикул, укажите их для проверки.",
+                offers.stream().limit(3).toList());
     }
 
     Reply plan(Turn turn, MlClient.Interpretation input, Map<String, Object> requirements) {
         String product = query(requirements.get("product_name"));
         String useCase = query(requirements.get("use_case"));
         String modelQuery = query(input.productQuery());
-        if ("product_question".equals(input.intent())) {
-            return question(turn, modelQuery, product, useCase);
-        }
-        boolean known = "known_product".equals(input.intent());
-        String search = known ? first(product, modelQuery) : first(modelQuery, useCase);
+        boolean known = "known_product".equals(input.intent()) && (product != null || modelQuery != null || useCase == null);
+        String search = known ? first(product, modelQuery) : first(useCase, modelQuery);
         if (search == null) return Reply.text("clarify", QUESTIONS.get(known ? "product_name" : "use_case"));
-        List<Offer> found = catalog.find(turn.catalogVersion(), search, true);
-        if (found.isEmpty() && known && modelQuery != null && !normalize(modelQuery).equals(normalize(search))) {
-            found = catalog.find(turn.catalogVersion(), modelQuery, true);
-        }
+
+        ProductMatch match = known ? resolveProduct(turn.catalogVersion(), search) : null;
+        List<Offer> found = known ? match.offers() : catalog.find(turn.catalogVersion(), search, true);
         if (found.isEmpty()) {
-            if (known) return offCatalog();
+            if (known && CatalogSearch.mentions(turn.userText(), search)
+                    && CommercialRequest.wantsOrder(FaqText.key(turn.userText()))) return offCatalog();
             return Reply.text("insufficient_data", "Подходящую позицию в текущем каталоге подтвердить не удалось. "
-                    + "Уточните требования или название продукта.");
+                    + "Уточните параметры или артикул, если он известен.");
         }
-        if (known && product != null) {
-            List<Offer> exact = found.stream().filter(offer -> matchesProduct(offer, search)).toList();
-            if (exact.isEmpty()) {
-                var family = found.stream().filter(offer -> matchesProduct(offer, modelQuery)).findFirst();
-                if (family.isPresent()) {
-                    return offerReply("insufficient_data", "Найдено похожее семейство. "
-                            + "Точное название и редакцию нужно подтвердить по артикулу.", List.of(family.get()));
-                }
-                return Reply.text("insufficient_data", "Точное совпадение в каталоге не подтверждено. "
-                        + "Уточните артикул или скажите, рассматриваете ли вы замену.");
-            }
-            found = exact;
+
+        Map<String, Object> filters = new LinkedHashMap<>(requirements);
+        if (known && match.edition() != null) filters.putIfAbsent("edition", match.edition());
+        List<Candidate> candidates = found.stream()
+                .filter(CatalogSearch::canRecommend)
+                .map(offer -> new Candidate(offer, unmet(offer, filters))).filter(candidate -> candidate.missing() != null)
+                .toList();
+        List<Offer> confirmed = candidates.stream().filter(candidate -> candidate.missing().isEmpty())
+                .map(Candidate::offer).limit(3).toList();
+        if (!confirmed.isEmpty()) {
+            String field = clarification(input, filters, candidates, known, useCase);
+            if (field != null) return Reply.text("clarify", QUESTIONS.get(field));
+            return offerReply("recommend", recommendation(confirmed, known ? match.family() : null), confirmed);
         }
-        List<Offer> filtered = found.stream().filter(offer -> matches(offer, requirements, false)).toList();
-        if (filtered.isEmpty()) {
-            return Reply.text("insufficient_data", "В текущем каталоге нет подтверждённого варианта с такими параметрами. "
-                    + "Проверьте требования или уточните возможность поставки у менеджера.");
+        if (candidates.isEmpty()) {
+            String target = known ? " семейства «" + match.family() + "»" : "";
+            return Reply.text("insufficient_data", "В каталоге есть позиции" + target
+                    + ", но подтверждённые характеристики не совпадают со всеми требованиями. Уточните параметры или артикул.");
         }
+
+        List<Candidate> partial = candidates.stream().sorted(Comparator.comparingInt(c -> c.missing().size()))
+                .limit(3).toList();
+        var missing = new LinkedHashSet<String>();
+        partial.forEach(candidate -> missing.addAll(candidate.missing()));
+        String target = known ? " семейства «" + match.family() + "»" : " по описанной задаче";
+        String labels = missing.stream().map(field -> "edition".equals(field) && filters.containsKey(field)
+                ? "редакцию «" + filters.get(field) + "»" : FIELD_LABELS.get(field))
+                .collect(Collectors.joining(", "));
+        String conditions = known ? confirmedConditions(partial.getFirst(), filters) : "";
+        return offerReply("insufficient_data", "Нашёл в каталоге позиции" + target + ". " + conditions
+                + "По карточкам пока не удалось подтвердить " + labels + ". Если знаете артикул, напишите его.",
+                partial.stream().map(Candidate::offer).toList());
+    }
+
+    private static String confirmedConditions(Candidate candidate, Map<String, Object> filters) {
+        Offer offer = candidate.offer();
+        List<String> details = new ArrayList<>();
+        if (filters.containsKey("license_kind") && !candidate.missing().contains("license_kind")) {
+            details.add("renewal".equals(offer.licenseKind()) ? "продление" : "новая лицензия");
+        }
+        if (filters.containsKey("seats") && !candidate.missing().contains("seats")) {
+            details.add(offer.seats() + " польз.");
+        }
+        if (filters.containsKey("license_term_months") && !candidate.missing().contains("license_term_months")) {
+            details.add(offer.term() + " мес.");
+        }
+        return details.isEmpty() ? "" : "В первой карточке подтверждены " + String.join(", ", details) + ". ";
+    }
+
+    private static String clarification(MlClient.Interpretation input, Map<String, Object> filters,
+                                        List<Candidate> candidates, boolean known, String useCase) {
         for (String field : input.clarificationCandidates()) {
-            if (field == null || !QUESTIONS.containsKey(field) || requirements.containsKey(field)) continue;
-            if (known && "edition".equals(field) && filtered.stream().noneMatch(offer -> offer.edition() != null)) continue;
-            return Reply.text("clarify", QUESTIONS.get(field));
+            if (field == null || !QUESTIONS.containsKey(field) || filters.containsKey(field)) continue;
+            if (!known && useCase != null && List.of("product_name", "edition").contains(field)) continue;
+            if (candidates.stream().map(candidate -> attribute(candidate.offer(), field))
+                    .filter(Objects::nonNull).distinct().limit(2).count() == 2) return field;
         }
-        List<Offer> confirmed = filtered.stream().filter(o -> matches(o, requirements, true)).limit(3).toList();
-        if (confirmed.isEmpty()) {
-            return offerReply("insufficient_data", "Найдено семейство или похожие позиции. "
-                    + "Некоторые запрошенные параметры отсутствуют в каталоге и требуют подтверждения.", filtered.subList(0, 1));
+        return null;
+    }
+
+    private ProductMatch resolveProduct(UUID version, String query) {
+        if (query == null) return new ProductMatch(null, null, List.of());
+        List<Offer> exact = catalog.findProduct(version, query);
+        if (!exact.isEmpty()) return new ProductMatch(query, null, exact);
+        int split = query.lastIndexOf(' ');
+        for (int attempts = 0; split > 0 && attempts < 2; attempts++) {
+            String family = query.substring(0, split).stripTrailing();
+            List<Offer> related = catalog.findProduct(version, family);
+            if (!related.isEmpty()) return new ProductMatch(family, query.substring(split + 1).strip(), related);
+            split = family.lastIndexOf(' ');
         }
-        return offerReply("recommend", "По текущему снимку каталога найдены варианты с подтверждёнными параметрами.", confirmed);
+        return new ProductMatch(query, null, List.of());
     }
 
     private static Reply offCatalog() {
@@ -190,74 +341,165 @@ class ReplyPlanner {
                 + "Если знаете производителя или артикул, напишите их здесь.");
     }
 
-    private Reply question(Turn turn, String query, String product, String useCase) {
-        String topic = first(useCase, query);
-        var articles = catalog.knowledge(topic);
-        if (!articles.isEmpty()) {
-            List<Fact> facts = new ArrayList<>();
-            List<JsonNode> sources = new ArrayList<>();
-            for (var article : articles) {
-                facts.add(new Fact("f" + (facts.size() + 1), "По справке «" + article.title() + "»: "
-                        + article.text().strip()));
-                sources.add(catalog.source(article));
-            }
-            return new Reply("answer", facts, List.of(), sources);
+    private Reply knowledgeReply(List<Knowledge> articles) {
+        List<Fact> facts = new ArrayList<>();
+        List<JsonNode> sources = new ArrayList<>();
+        for (Knowledge article : articles) {
+            facts.add(new Fact("f" + (facts.size() + 1), "По справке «" + article.title() + "»: " + article.text().strip()));
+            sources.add(catalog.source(article));
         }
-        var offers = catalog.find(turn.catalogVersion(), first(product, query), false);
-        return offers.stream().filter(offer -> matchesProduct(offer, first(product, query))).findFirst()
-                .map(offer -> offerReply("answer", "Вот что подтверждено в текущем снимке каталога. "
-                        + "Отсутствующие в карточке характеристики нужно уточнить.", List.of(offer)))
-                .orElseGet(() -> Reply.text("insufficient_data", "Подтверждённого ответа в каталоге и справке пока нет."));
+        return new Reply("answer", facts, List.of(), sources);
     }
 
-    private Reply offerReply(String outcome, String intro, List<Offer> offers) {
-        List<Fact> facts = new ArrayList<>();
-        facts.add(new Fact("f1", intro));
-        for (Offer offer : offers) {
-            List<String> data = new ArrayList<>();
-            if (offer.seats() != null) data.add("пользователей: " + offer.seats());
-            if (offer.term() != null) data.add("срок лицензии: " + offer.term() + " мес.");
-            if (offer.updatesTerm() != null) data.add("срок обновлений: " + offer.updatesTerm() + " мес.");
-            if (offer.platform() != null) data.add("платформа: " + offer.platform());
-            if (offer.licenseKind() != null) data.add("renewal".equals(offer.licenseKind()) ? "продление" : "новая лицензия");
-            if (offer.registryNumber() != null) data.add("номер записи в реестре: " + offer.registryNumber());
-            JsonNode price = catalog.card(offer).path("price");
-            if (price.isObject()) data.add("цена по фиду: " + price.path("amount").asText() + " " + price.path("currency").asText());
-            String suffix = data.isEmpty() ? "" : " (" + String.join(", ", data) + ")";
-            facts.add(new Fact("f" + (facts.size() + 1), offer.name() + suffix + "."));
-        }
-        return new Reply(outcome, facts, offers.stream().map(catalog::card).toList(),
+    private Reply offerReply(String outcome, String text, List<Offer> offers) {
+        return new Reply(outcome, List.of(new Fact("f1", text)), offers.stream().map(catalog::card).toList(),
                 offers.stream().map(catalog::source).toList());
     }
 
-    private static boolean matches(Offer o, Map<String, Object> r, boolean requireEvidence) {
-        if (!equalsOrUnknown(r.get("edition"), o.edition(), requireEvidence)
-                || !equalsOrUnknown(r.get("license_kind"), o.licenseKind(), requireEvidence)
-                || !equalsOrUnknown(r.get("platform"), o.platform(), requireEvidence)
-                || !equalsOrUnknown(r.get("deployment"), o.deployment(), requireEvidence)) return false;
-        if (r.get("seats") instanceof Number seats && (o.seats() == null ? requireEvidence : o.seats() < seats.intValue())) return false;
-        if (r.get("license_term_months") instanceof Number term && (o.term() == null ? requireEvidence : !o.term().equals(term.intValue()))) return false;
-        if (Boolean.TRUE.equals(r.get("domestic_required"))
-                && (o.registryNumber() == null || !o.registryNumber().matches("[0-9]+"))) return !requireEvidence;
-        if (r.get("budget_rub") instanceof String budget) {
-            if (o.price() == null || o.price().signum() == 0 || !List.of("RUB", "RUR").contains(Objects.toString(o.currency(), ""))) {
-                return !requireEvidence;
-            }
-            return o.price().compareTo(new BigDecimal(budget)) <= 0;
+    private static String recommendation(List<Offer> offers, String family) {
+        String product = family == null ? "" : " для «" + family + "»";
+        if (offers.size() == 1) return "Нашёл подходящую позицию" + product + ". Проверьте условия в карточке.";
+        List<String> differences = new ArrayList<>();
+        if (varies(offers, Offer::term)) differences.add("срок");
+        if (varies(offers, Offer::licenseKind)) differences.add("тип лицензии");
+        if (varies(offers, Facet.PRICE::value)) differences.add("цена");
+        String detail = differences.isEmpty() ? "" : " Различаются " + String.join(", ", differences) + ".";
+        return "Нашёл подходящие варианты" + product + "." + detail + " Сравните условия в карточках.";
+    }
+
+    private static boolean varies(List<Offer> offers, Function<Offer, ?> attribute) {
+        return offers.stream().map(attribute).filter(Objects::nonNull).distinct().limit(2).count() == 2;
+    }
+
+    private static List<String> unmet(Offer offer, Map<String, Object> requirements) {
+        List<String> missing = new ArrayList<>();
+        for (var requirement : requirements.entrySet()) {
+            String field = requirement.getKey();
+            if (!FIELD_LABELS.containsKey(field)) continue;
+            Match result = compare(offer, field, requirement.getValue());
+            if (result == Match.CONFLICT) return null;
+            if (result == Match.UNKNOWN) missing.add(field);
         }
-        return true;
+        return missing;
     }
 
-    private static boolean matchesProduct(Offer offer, String query) {
-        return query != null && (offer.id().equals(query) || query.equalsIgnoreCase(offer.vendorCode())
-                || normalize(offer.name()).contains(normalize(query)));
+    private static Match compare(Offer offer, String field, Object wanted) {
+        if ("edition".equals(field)) return editionMatch(offer, wanted.toString());
+        if ("domestic_required".equals(field)) {
+            return Boolean.TRUE.equals(wanted) && (offer.registryNumber() == null || !offer.registryNumber().matches("[0-9]+"))
+                    ? Match.UNKNOWN : Match.CONFIRMED;
+        }
+        if ("budget_rub".equals(field)) {
+            if (offer.price() == null || offer.price().signum() <= 0
+                    || !List.of("RUB", "RUR").contains(Objects.toString(offer.currency(), ""))) return Match.UNKNOWN;
+            return offer.price().compareTo(new BigDecimal(wanted.toString())) <= 0 ? Match.CONFIRMED : Match.CONFLICT;
+        }
+        Object actual = attribute(offer, field);
+        if (actual == null) return Match.UNKNOWN;
+        boolean matches = switch (field) {
+            case "seats" -> ((Number) actual).intValue() >= ((Number) wanted).intValue();
+            case "license_term_months", "license_kind" -> wanted.equals(actual);
+            case "deployment" -> CatalogSearch.mentions(deployment(actual.toString()), deployment(wanted.toString()));
+            default -> CatalogSearch.mentions(platform(actual.toString()), platform(wanted.toString()));
+        };
+        return matches ? Match.CONFIRMED : Match.CONFLICT;
     }
 
-    private static boolean equalsOrUnknown(Object wanted, String actual, boolean requireEvidence) {
-        return wanted == null || (actual == null ? !requireEvidence
-                : java.util.regex.Pattern.compile("(?U)(^|[^\\p{L}\\p{N}])"
-                        + java.util.regex.Pattern.quote(normalize(wanted.toString())) + "($|[^\\p{L}\\p{N}])")
-                        .matcher(normalize(actual)).find());
+    private static Match editionMatch(Offer offer, String edition) {
+        if (offer.edition() == null) return CatalogSearch.mentions(offer.name(), edition) ? Match.CONFIRMED : Match.UNKNOWN;
+        return CatalogSearch.mentions(offer.edition(), edition) ? Match.CONFIRMED : Match.CONFLICT;
+    }
+
+    private static Object attribute(Offer offer, String field) {
+        return switch (field) {
+            case "edition" -> offer.edition();
+            case "license_kind" -> offer.licenseKind();
+            case "seats" -> offer.seats();
+            case "license_term_months" -> offer.term();
+            case "platform" -> offer.platform();
+            case "deployment" -> offer.deployment();
+            case "domestic_required" -> offer.registryNumber();
+            case "budget_rub" -> offer.price();
+            default -> null;
+        };
+    }
+
+    private static String deployment(String value) {
+        return normalize(value).replaceAll("(?U)\\b(?:локальн[а-я]*|на сво[её]м сервере|on[ _-]prem(?:ises)?)\\b", "on_prem")
+                .replaceAll("(?U)\\b(?:облачн[а-я]*|(?:в )?облаке|cloud|saas)\\b", "cloud");
+    }
+
+    private static String platform(String value) {
+        return normalize(value).replaceAll("(?U)\\b(?:mac os(?: x)?|os x|macos)\\b", "macos");
+    }
+
+    private static String platformIn(String text) {
+        var os = OS.matcher(text);
+        if (!os.find()) return null;
+        return switch (platform(os.group())) {
+            case "linux" -> "Linux";
+            case "windows" -> "Windows";
+            case "macos" -> "macOS";
+            case "android" -> "Android";
+            case "ios" -> "iOS";
+            default -> "Astra Linux";
+        };
+    }
+
+    private enum Match { CONFIRMED, UNKNOWN, CONFLICT }
+
+    private record Candidate(Offer offer, List<String> missing) {}
+    private record ProductMatch(String family, String edition, List<Offer> offers) {}
+
+    private enum Facet {
+        PLATFORM("совместимые платформы", "операционную систему", "совместимость OR платформы OR операционная система OR Linux OR Windows OR macOS",
+                "(?:ос|операционн[а-я]+ систем[а-я]*|платформ[а-я]*|linux|windows|macos|mac os|android|ios|совместим[а-я]*)"),
+        DEPLOYMENT("развёртывание", "способ развёртывания", "развертывание OR облако OR сервер OR локально",
+                "(?:развертыван[а-я]*|облачн[а-я]*|облаке|локальн[а-я]*|своем сервере|on prem|cloud)"),
+        LICENSE_TERM("срок лицензии", "срок лицензии", "срок лицензии OR действует",
+                "(?:срок[а-я]* лиценз[а-я]*|сколько действует)"),
+        LICENSE("лицензия", "тип или срок лицензии", "условия лицензии OR срок лицензии OR продление",
+                "(?:тип лиценз[а-я]*|лицензирован[а-я]*|продл[а-я]*|лицензи[а-я]*)"),
+        PRICE("цена", "цену", "цена", "(?:цен[а-я]*|стоимост[а-я]*|сколько стоит)");
+
+        private final String label;
+        private final String missing;
+        private final String search;
+        private final Pattern terms;
+
+        Facet(String label, String missing, String search, String terms) {
+            this.label = label;
+            this.missing = missing;
+            this.search = search;
+            this.terms = Pattern.compile("(?U)\\b" + terms + "\\b");
+        }
+
+        static Facet in(String text) {
+            for (Facet facet : List.of(PRICE, PLATFORM, DEPLOYMENT, LICENSE_TERM, LICENSE)) {
+                if (facet.terms.matcher(text).find()) return facet;
+            }
+            return null;
+        }
+
+        String value(Offer offer) {
+            return switch (this) {
+                case PLATFORM -> offer.platform();
+                case DEPLOYMENT -> offer.deployment();
+                case LICENSE_TERM -> offer.term() == null ? null : offer.term() + " мес.";
+                case PRICE -> offer.price() == null || offer.price().signum() <= 0 || offer.currency() == null ? null
+                        : offer.price().stripTrailingZeros().toPlainString() + " "
+                        + ("RUR".equals(offer.currency()) ? "RUB" : offer.currency());
+                case LICENSE -> {
+                    String kind = switch (Objects.toString(offer.licenseKind(), "")) {
+                        case "new" -> "новая лицензия";
+                        case "renewal" -> "продление";
+                        default -> null;
+                    };
+                    if (offer.term() == null) yield kind;
+                    yield kind == null ? offer.term() + " мес." : kind + ", " + offer.term() + " мес.";
+                }
+            };
+        }
     }
 
     private static Object value(String field, JsonNode value) {
@@ -270,6 +512,8 @@ class ReplyPlanner {
                     ? value.textValue() : null;
             case "budget_rub" -> value.isTextual() && value.textValue().matches("[0-9]{1,14}(\\.[0-9]{1,4})?")
                     ? value.textValue() : null;
+            case "deployment" -> value.isTextual() && query(value.textValue()) != null
+                    ? deployment(value.textValue()) : null;
             default -> value.isTextual() ? query(value.textValue()) : null;
         };
     }

@@ -29,6 +29,65 @@ DEFERRED_PAYMENT = "Мне дорого, можно рассчитаться ч�
 NEGATED_DEFERRAL = "Отсрочка нам не нужна"
 
 
+RESPONSE_FEED = """<yml_catalog date="2026-11-26 12:00">
+    <shop>
+        <offers>
+            <offer id="mail-small" available="true">
+                <name>MDaemon Messaging Server</name>
+                <url>https://example.test/mail-small</url>
+                <price>100</price>
+                <currencyId>RUB</currencyId>
+                <param name="К-во пользователей до">20</param>
+                <param name="Алиас">Mail Suite</param>
+            </offer>
+            <offer id="mail-renewal" available="true">
+                <name>MDaemon Messaging Server продление</name>
+                <url>https://example.test/mail-renewal</url>
+                <price>125</price>
+                <currencyId>RUB</currencyId>
+                <param name="К-во пользователей до">50</param>
+                <param name="Тип лицензии">Продление</param>
+                <param name="Срок действия">12 мес.</param>
+            </offer>
+            <offer id="bat-pro" available="true">
+                <name>The Bat! Лицензия Professional</name>
+                <url>https://example.test/bat-pro</url>
+                <price>120</price>
+                <currencyId>RUB</currencyId>
+                <vendorCode>BAT-PRO</vendorCode>
+                <param name="Операционная система">Windows</param>
+            </offer>
+            <offer id="protect-local" available="true">
+                <name>Защита рабочих станций Safe Suite</name>
+                <url>https://example.test/protect-local</url>
+                <price>110</price>
+                <currencyId>RUB</currencyId>
+                <param name="К-во пользователей до">50</param>
+                <param name="Операционная система">Windows</param>
+                <param name="Тип развёртывания">Локальное</param>
+            </offer>
+            <offer id="protect-cloud" available="true">
+                <name>Защита рабочих станций Cloud Suite</name>
+                <url>https://example.test/protect-cloud</url>
+                <price>110</price>
+                <currencyId>RUB</currencyId>
+                <param name="К-во пользователей до">100</param>
+                <param name="Операционная система">Windows</param>
+                <param name="Тип развёртывания">Cloud</param>
+            </offer>
+            <offer id="protect-unknown" available="true">
+                <name>Защита рабочих станций Unknown Suite</name>
+                <url>https://example.test/protect-unknown</url>
+                <price>110</price>
+                <currencyId>RUB</currencyId>
+                <param name="К-во пользователей до">100</param>
+                <param name="Операционная система">Windows</param>
+            </offer>
+        </offers>
+    </shop>
+</yml_catalog>"""
+
+
 class ReviewMock(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -50,11 +109,9 @@ class ReviewMock(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/internal/v1/interpret":
             self.server.interpreted.append(data["text"])
-            handoff = data["text"] in self.server.handoff_questions
-            self.server.handoff_questions.discard(data["text"])
-            result = {"intent": "known_product" if handoff else "product_question",
-                      "product_query": "MissingDemoProduct" if handoff else data["text"],
-                      "updates": [], "clarification_candidates": [], "model_version": "fixture"}
+            result = {"intent": "product_question", "product_query": data["text"],
+                      "updates": [], "clarification_candidates": [], "model_version": "fixture",
+                      **self.server.interpretations.get(data["text"], {})}
             if data["text"] == DEFERRED_PAYMENT:
                 result["signals"] = [{"kind": "price_objection", "evidence": "Мне дорого"},
                                      {"kind": "payment_deferral", "evidence": "рассчитаться через 30 дней"}]
@@ -83,7 +140,7 @@ class ReviewMock(BaseHTTPRequestHandler):
         self.send_payload(json.dumps(result).encode())
 
 
-def exercise(origin, mock, sql):
+def chat_client(origin):
     def call(path, method="GET", *, token=None, cookie=None, body=None, expected=200):
         headers = {"Origin": origin, "Content-Type": "application/json"}
         if token:
@@ -113,10 +170,19 @@ def exercise(origin, mock, sql):
         assert "event:done" in stream
         return call(path, cookie=cookie)[0]["messages"][-1]
 
+    return call, new_session, ask
+
+
+def exercise(origin, mock, sql):
+    call, new_session, ask = chat_client(origin)
+
     def case(question, answer=None, clarification=None):
         path, cookie = new_session()
-        mock.handoff_questions.add(question)
-        ask(path, cookie, question)
+        ask(path, cookie, "Проверьте возможность поставки ExampleMail Enterprise.")
+        # Seed the historical question to isolate review and publication from handoff routing.
+        literal = question.replace("'", "''")
+        session_id = path.rsplit("/", 1)[1]
+        sql(f"UPDATE chat_messages SET body = '{literal}' WHERE session_id = '{session_id}' AND role = 'user';")
         handoff = call(path + "/handoff", cookie=cookie)[0]["handoff"]
         manager = f"/api/v1/manager/handoffs/{handoff['handoff_id']}"
         call(manager + "/claim", "POST", token=OWNER)
@@ -316,6 +382,151 @@ def exercise(origin, mock, sql):
     print("PASS: support guides, handoff context, priced unavailable offer, discount, quote and invoice")
 
 
+def exercise_responses(origin, mock, sql):
+    call, new_session, ask = chat_client(origin)
+
+    def interpretation(text, intent, product=None, values=(), candidates=(), signals=()):
+        mock.interpretations[text] = {
+            "intent": intent, "product_query": product,
+            "updates": [{"op": "set", "field": field, "value": value, "evidence": evidence}
+                        for field, value, evidence in values],
+            "clarification_candidates": list(candidates),
+            "signals": [{"kind": kind, "evidence": evidence} for kind, evidence in signals],
+        }
+        return text
+
+    path, cookie = new_session()
+    first = interpretation("Нужна лицензия MDaemon на 50 пользователей", "known_product", "MDaemon",
+                           [("product_name", "MDaemon", "MDaemon"), ("seats", 50, "50 пользователей")])
+    recommendation = ask(path, cookie, first)
+    assert recommendation["cards"][0]["attributes"]["seats"] == 50
+    second = interpretation("Исправь на 20 пользователей", "known_product", "MDaemon",
+                            [("seats", 20, "20 пользователей")])
+    assert ask(path, cookie, second)["cards"][0]["attributes"]["seats"] == 20
+    question = interpretation("А для какой ОС подходит The Bat! Professional?", "product_question", "The Bat! Professional",
+                              [("product_name", "The Bat! Professional", "The Bat! Professional")])
+    reply = ask(path, cookie, question)
+    assert reply["cards"][0]["offer_id"] == "bat-pro" and "Windows" in reply["text"], reply
+    assert all("The Bat!" in source["title"] for source in reply["sources"])
+    linux = interpretation("А он работает на Linux?", "product_question", "MDaemon")
+    reply = ask(path, cookie, linux)
+    assert "совместимость с Linux" in reply["text"] and "не удалось подтвердить" in reply["text"], reply
+    assert all("MDaemon" in card["name"] for card in reply["cards"]), reply
+    where = interpretation("А он разворачивается в облаке?", "product_question", "MDaemon")
+    assert "способ развёртывания" in ask(path, cookie, where)["text"]
+    assert ask(path, cookie, interpretation("Сколько стоит Mail Suite?", "product_question", "Mail Suite"))["cards"], "alias"
+    assert "120 RUB" in ask(path, cookie, interpretation("Какова цена BAT-PRO?", "product_question", "BAT-PRO"))["text"]
+    compatible = interpretation("Снова подбери MDaemon", "known_product", "MDaemon")
+    assert ask(path, cookie, compatible)["cards"][0]["attributes"]["seats"] == 20
+    assert "генерация" not in reply["text"].lower()
+    assert mock.compositions == 0 and mock.interpreted.count(first) == 1
+    first_request = interpretation("Уточните, какая ОС у MDaemon?", "product_question", "MDaemon")
+    saved_reply = ask(path, cookie, first_request)
+    assert saved_reply["sources"] and call(path, cookie=cookie)[0]["messages"][-1] == saved_reply
+
+    path, cookie = new_session()
+    renewal = interpretation("Нужно продление MDaemon Standard на 50 пользователей на год", "known_product",
+                             "MDaemon Standard", [("product_name", "MDaemon Standard", "MDaemon Standard"),
+                             ("license_kind", "renewal", "продление"), ("seats", 50, "50 пользователей"),
+                             ("license_term_months", 12, "на год")])
+    reply = ask(path, cookie, renewal)
+    assert "Standard" in reply["text"] and "продление" in reply["text"], reply
+    assert [card["offer_id"] for card in reply["cards"]] == ["mail-renewal"], reply
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+
+    path, cookie = new_session()
+    values = [("use_case", "защита рабочих станций", "защита рабочих станций"), ("seats", 35, "35 сотрудников"),
+              ("deployment", "on_prem", "локально"), ("platform", "Windows", "Windows"),
+              ("domestic_required", True, "желательно из реестра российского ПО")]
+    protection = interpretation("Нужна защита рабочих станций для 35 сотрудников. Windows, локально, желательно из реестра российского ПО.",
+                                "needs_solution", values=values, candidates=["product_name", "edition"])
+    reply = ask(path, cookie, protection)
+    assert [card["offer_id"] for card in reply["cards"]] == ["protect-local"], reply
+    assert reply["cards"][0]["attributes"].get("registry_number") is None
+    incomplete = interpretation("Нужна защита рабочих станций для 75 сотрудников. Windows, локально.",
+                                 "needs_solution", values=[values[0], ("seats", 75, "75 сотрудников"), *values[2:4]],
+                                 candidates=["product_name", "edition"])
+    reply = ask(path, cookie, incomplete)
+    assert "способ развёртывания" in reply["text"] and "название" not in reply["text"], reply
+    assert [card["offer_id"] for card in reply["cards"]] == ["protect-unknown"], reply
+
+    path, cookie = new_session()
+    for question in ("Можно узнать условия отсрочки оплаты?", "Можно узнать, какие условия отсрочки оплаты?"):
+        interpretation(question, "known_product", signals=[("payment_deferral", "отсрочки")])
+        answer = ask(path, cookie, question)
+        assert "условия отсрочки" in answer["text"] and "подтвердить" in answer["text"], answer
+        assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+    card_question = interpretation("Отсрочку не хочу, можно оплатить сразу картой?", "known_product",
+                                   signals=[("payment_deferral", "Отсрочку")])
+    answer = ask(path, cookie, card_question)
+    assert "банковской картой" in answer["text"] and answer["sources"], answer
+    outside = ask(path, cookie, "Как узнать, можно ли заказать ПО вне каталога?")
+    assert outside["sources"] and call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+    assert "артикул" in ask(path, cookie, "Проверьте возможность поставки.")["text"]
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+    hypothetical = ask(path, cookie, "Что делать, если ключ не пришёл?")
+    assert hypothetical["sources"] and call(path, cookie=cookie)[0].get("support_topic") is None
+    refund = ask(path, cookie, "Как вернуть товар?")
+    assert refund["sources"] and call(path, cookie=cookie)[0].get("support_topic") is None
+    own = ask(path, cookie, "Мой ключ не активируется")
+    assert own["sources"] and call(path, cookie=cookie)[0]["support_topic"] == "key_activation"
+    ask(path, cookie, "Не помогло")
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"]["reason"] == "instruction_failed"
+
+    path, cookie = new_session()
+    ask(path, cookie, "Прошу отсрочку оплаты до следующего месяца")
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"]["reason"] == "payment_deferral"
+    path, cookie = new_session()
+    ask(path, cookie, DEFERRED_PAYMENT)
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"]["reason"] == "payment_deferral"
+    assert mock.interpreted.count(DEFERRED_PAYMENT) == 1
+    assert mock.compositions == 0, "Typical questions and recommendations must skip composition"
+    print("PASS: product context, confirmed attributes, partial family, task filters, guide vs handoff and no compose")
+
+
+def exercise_snapshot(origin, mock, sql):
+    call, new_session, ask = chat_client(origin)
+    assert int(sql("SELECT count(*) FROM catalog_offers;")) >= 100_000
+
+    def ask_catalog(text, product, intent="known_product", **requirements):
+        mock.interpretations[text] = {"intent": intent, "product_query": product, "updates": [
+            {"op": "set", "field": field, "value": value, "evidence": evidence}
+            for field, (value, evidence) in requirements.items()
+        ]}
+        return ask(path, cookie, text)
+
+    path, cookie = new_session()
+    ask_catalog("Подбери MDaemon на 50 пользователей", "MDaemon",
+                product_name=("MDaemon", "MDaemon"), seats=(50, "50 пользователей"))
+    ask_catalog("Исправь на 20 пользователей", "MDaemon", seats=(20, "20 пользователей"))
+    reply = ask_catalog("Для какой ОС подходит The Bat! Professional?", "The Bat! Professional", "product_question")
+    assert reply["cards"] and all("The Bat!" in card["name"] for card in reply["cards"]), reply
+    assert "операционную систему" in reply["text"], reply
+    reply = ask_catalog("А MDaemon поддерживает Linux?", "MDaemon", "product_question")
+    assert "совместимость с Linux" in reply["text"], reply
+    session_id = path.rsplit("/", 1)[1]
+    assert sql(f"SELECT requirements->>'seats' FROM chat_sessions WHERE session_id = '{session_id}';") == "20"
+    assert ask_catalog("Снова подбери MDaemon", "MDaemon")["cards"]
+
+    path, cookie = new_session()
+    reply = ask_catalog("Нужно продление MDaemon Standard на 50 пользователей на год", "MDaemon Standard",
+                        product_name=("MDaemon Standard", "MDaemon Standard"),
+                        license_kind=("renewal", "продление"), seats=(50, "50 пользователей"),
+                        license_term_months=(12, "на год"))
+    assert "Standard" in reply["text"] and reply["cards"], reply
+    assert any(card["attributes"].get("seats") == 50 and card["attributes"].get("license_term_months") == 12
+               and card["attributes"].get("license_kind") == "renewal" for card in reply["cards"]), reply
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+    path, cookie = new_session()
+    reply = ask_catalog("Нужна защита рабочих станций для 35 сотрудников. Windows, локально, желательно из реестра.",
+                        None, "needs_solution", use_case=("защита рабочих станций", "защита рабочих станций"),
+                        seats=(35, "35 сотрудников"), platform=("Windows", "Windows"),
+                        deployment=("on_prem", "локально"), domestic_required=(True, "желательно из реестра"))
+    assert "способ развёртывания" in reply["text"] and reply["cards"], reply
+    assert mock.compositions == 0
+    print("PASS: full catalog import, The Bat! vs MDaemon, partial Standard renewal and deployment evidence")
+
+
 def run(args):
     def sql(statement):
         return subprocess.check_output([
@@ -331,13 +542,14 @@ def run(args):
         mock.interpreted = []
         mock.force_timeout = False
         mock.force_unknown_source = False
-        mock.handoff_questions = set()
+        mock.interpretations = {}
         threading.Thread(target=mock.serve_forever, daemon=True).start()
         db_address = subprocess.check_output(
             ["docker", "compose", "-f", args.compose_file, "port", "postgres", "5432"], text=True,
         ).strip()
-        feed = Path(temp, "feed.xml")
-        feed.write_text("""<yml_catalog date="2026-11-26 12:00"><shop><offers>
+        feed = args.catalog_file or Path(temp, "feed.xml")
+        if not args.catalog_file:
+            feed.write_text(RESPONSE_FEED if args.response_quality else """<yml_catalog date="2026-11-26 12:00"><shop><offers>
           <offer id="fixture" available="false"><name>Fixture</name><url>https://example.test/product</url>
             <price>100</price><currencyId>RUB</currencyId></offer>
           </offers></shop></yml_catalog>""")
@@ -359,13 +571,18 @@ def run(args):
         with log.open("w") as out:
             java = subprocess.Popen(["java", "-jar", args.jar], env=env, stdout=out, stderr=out)
             try:
-                deadline = time.monotonic() + 22
+                deadline = time.monotonic() + (150 if args.catalog_file else 22)
                 while "Catalog check complete" not in log.read_text():
                     assert time.monotonic() < deadline and java.poll() is None, "Backend failed to start"
                     time.sleep(0.1)
                 assert sql("SELECT count(*) FROM chat_handoffs;") == "0", "Use a disposable database"
-                manager_regression(origin, [OWNER, OTHER])
-                exercise(origin, mock, sql)
+                if args.catalog_file:
+                    exercise_snapshot(origin, mock, sql)
+                elif args.response_quality:
+                    exercise_responses(origin, mock, sql)
+                else:
+                    manager_regression(origin, [OWNER, OTHER])
+                    exercise(origin, mock, sql)
             except Exception:
                 print(log.read_text()[-6000:])
                 raise
@@ -382,5 +599,7 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compose-file", required=True, help="Disposable postgres service with a loopback port")
+    parser.add_argument("--response-quality", action="store_true")
+    parser.add_argument("--catalog-file", type=Path, help="Path to the full catalog snapshot")
     parser.add_argument("--jar", default="backend/target/support-agent-0.1.0-SNAPSHOT.jar")
     run(parser.parse_args())
