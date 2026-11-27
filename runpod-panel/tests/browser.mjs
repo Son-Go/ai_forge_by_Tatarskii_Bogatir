@@ -32,7 +32,9 @@ try {
   await page.unroute("**/api/state");
 
   await expect(page.locator("#problem")).toHaveText("2");
-  await expect(page.locator("#rollout-status")).toContainText("готовых и запущенных воркеров — 3, запросов в обработке — 2");
+  await expect(page.locator("#running-label")).toHaveText("Запущены");
+  await expect(page.locator("#running")).toHaveText("2");
+  await expect(page.locator("#rollout-status")).toContainText("В очереди Runpod — 1. В обработке — 2.");
   await expect(page.locator("#probe-budget")).toContainText("16 мин");
   await expect(page.locator("#overview").getByText(/Grafana считает токены запросов этого чата/)).toBeVisible();
   await expect(page.locator("#charts canvas")).toHaveCount(4);

@@ -164,6 +164,7 @@ def test_settings_show_diff_and_verify_after_rollout(client, mock):
         "stale_workers": 1,
         "current_ready": 1,
         "inactive_idle": 0,
+        "jobs_queued": 1,
         "jobs_in_progress": 2,
         "runtime_running": 2,
         "runtime_active": 3,
@@ -184,6 +185,7 @@ def test_idle_inventory_without_uptime_is_not_a_ready_worker(client, mock, endpo
     assert workers["inactive_idle"] == 1
     if endpoint_type == "QUEUE":
         assert workers["runtime_running"] == workers["runtime_active"] == 1
+        assert workers["jobs_queued"] == 1
         assert workers["jobs_in_progress"] == workers["busy"] == workers["problem"] == 0
     else:
         assert "runtime_running" not in workers

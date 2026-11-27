@@ -36,7 +36,7 @@ class RunpodMock:
         self.health_fault = False
         self.idle_uptime = 10
         self.health = {
-            "jobs": {"inProgress": 2},
+            "jobs": {"inProgress": 2, "inQueue": 1},
             "workers": {
                 "idle": 0,
                 "ready": 1,

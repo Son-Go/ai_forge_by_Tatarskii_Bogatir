@@ -188,6 +188,7 @@ class Runpod:
             "problem": None if throttled is None or unhealthy is None else throttled + unhealthy,
             "runtime_running": running,
             "runtime_active": None if ready is None or running is None else ready + running,
+            "jobs_queued": count(jobs.get("inQueue")),
             "jobs_in_progress": count(jobs.get("inProgress")),
         }
         if all(value is None for value in snapshot.values()):

@@ -160,13 +160,16 @@ function renderState() {
   }) : t("application_readiness_unavailable");
   byId("pending-review").hidden = !state?.pending;
   byId("review").disabled = operation === "review";
-  for (const key of ["ready", "busy", "starting", "problem"]) byId(key).textContent = number(workers?.[key]);
+  for (const key of ["ready", "starting", "problem"]) byId(key).textContent = number(workers?.[key]);
+  const running = workers?.runtime_running;
+  byId("running-label").textContent = t(running == null ? "busy" : "running");
+  byId("running").textContent = number(running ?? workers?.busy);
   byId("worker-observed").textContent = workers?.observed_at
     ? t("observed", { time: clockSeconds(workers.observed_at) }) : "";
   const workerNotes = [];
-  if (workers?.runtime_active != null || workers?.jobs_in_progress != null) {
+  if (workers?.jobs_queued != null || workers?.jobs_in_progress != null) {
     workerNotes.push(t("queue_runtime", {
-      active: number(workers.runtime_active), jobs: number(workers.jobs_in_progress),
+      queued: number(workers.jobs_queued), jobs: number(workers.jobs_in_progress),
     }));
   }
   if (workers?.inactive_idle > 0) {

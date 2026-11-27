@@ -49,7 +49,7 @@
       </div>
       <div class="tiles" id="actual-tiles">
         <article class="tile"><span data-i="ready"></span><strong id="ready"></strong></article>
-        <article class="tile"><span data-i="busy"></span><strong id="busy"></strong></article>
+        <article class="tile"><span id="running-label"></span><strong id="running"></strong></article>
         <article class="tile"><span data-i="starting"></span><strong id="starting"></strong></article>
         <article class="tile"><span data-i="problem"></span><strong id="problem"></strong></article>
       </div>
@@ -58,7 +58,7 @@
         <article class="card">
           <h2 data-i="configured_workers"></h2>
           <dl class="stats">
-            <div><dt data-i="active"></dt><dd id="active-stat"></dd></div>
+            <div><dt data-i="min_workers"></dt><dd id="active-stat"></dd></div>
             <div><dt data-i="max"></dt><dd id="max-stat"></dd></div>
           </dl>
           <a href="#workers" class="text-link" data-i="manage_workers"></a>
