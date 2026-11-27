@@ -114,9 +114,10 @@ async def interpret(
     body: InterpretRequest, provider: Runpod, response: Response
 ) -> InterpretResult:
     deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
+    prompt_version = provider.settings.ml_interpret_prompt_version
     with provider.call("interpret", body.request_id) as call:
         interpretation = await provider.complete(
-            prompts.INTERPRET,
+            prompts.INTERPRET_PROMPTS[prompt_version],
             model_payload(body, provider),
             call,
             deadline,
@@ -137,7 +138,7 @@ async def interpret(
             if signal.evidence in body.text:
                 signals.setdefault(signal.kind, signal)
         call.succeeded = True
-    response.headers["X-Prompt-Version"] = prompts.INTERPRET_VERSION
+    response.headers["X-Prompt-Version"] = prompt_version
     return InterpretResult(
         intent=interpretation.intent,
         product_query=interpretation.product_query,

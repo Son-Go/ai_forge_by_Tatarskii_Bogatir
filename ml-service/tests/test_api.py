@@ -7,6 +7,7 @@ import pytest
 from prometheus_client.parser import text_string_to_metric_families
 from starlette.requests import ClientDisconnect
 
+from app import prompts
 from app.config import Settings
 from app.main import create_app, make_deadline
 
@@ -334,9 +335,13 @@ async def test_invalid_input_is_400_before_runpod(settings, patch):
 
 
 @pytest.mark.parametrize("structured", [False, True])
-async def test_interpret_uses_runpod_and_returns_release_metadata(settings, structured):
+@pytest.mark.parametrize("version", [None, "interpret-5"])
+async def test_interpret_uses_runpod_and_returns_release_metadata(settings, structured, version):
     if structured:
         settings.runpod_response_format = "json_schema"
+    if version is not None:
+        settings.ml_interpret_prompt_version = version
+    expected_version = version or "interpret-6"
 
     def handler(request):
         assert str(request.url) == (
@@ -358,6 +363,7 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
             assert "evidence" not in clear_schema["required"]
         else:
             assert "response_format" not in body
+        assert body["messages"][0]["content"] == prompts.INTERPRET_PROMPTS[expected_version]
         assert json.loads(body["messages"][1]["content"]) == {
             "text": INTERPRET["text"],
             "conversation_context": [
@@ -371,7 +377,7 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
     async with client_for(settings, handler) as client:
         response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
     assert response.status_code == 200
-    assert response.headers["X-Prompt-Version"] == "interpret-5"
+    assert response.headers["X-Prompt-Version"] == expected_version
     assert response.json() == RESULT | {"model_version": "release-a", "signals": []}
 
 
@@ -488,6 +494,22 @@ async def test_interpret_rejects_invalid_model_update_safely(settings, update, r
         "private-model-text",
     ):
         assert text not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"clarification_candidates": ["seats", "seats"]},
+        {"clarification_candidates": ["unknown_field"]},
+        {"extra": True},
+    ],
+)
+async def test_interpret_rejects_invalid_model_fields(settings, patch):
+    async with client_for(settings, lambda _: completion(RESULT | patch)) as client:
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "MODEL_INVALID_OUTPUT"
 
 
 async def test_interpret_logs_invalid_json_as_a_code(settings, caplog):
