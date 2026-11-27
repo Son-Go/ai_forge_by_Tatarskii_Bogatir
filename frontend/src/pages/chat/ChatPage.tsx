@@ -12,7 +12,7 @@ import { DemoBanner, WorkspaceHeader } from '../../shared/ui/WorkspaceHeader'
 import { AutomaticHandoffNotice, type AutomaticHandoffNoticeData } from '../../features/chat/ui/AutomaticHandoffNotice'
 import { useSessionHandoff } from '../../features/handoff/useSessionHandoff'
 import { QuoteDraftAction } from '../../features/quote/QuoteDraftAction'
-import { formatDate } from '../../shared/lib/presentation'
+import { formatDate, formatPrice } from '../../shared/lib/presentation'
 
 const exampleQuestions = [
   'Какая лицензия MDaemon подойдёт для 50 пользователей?',
@@ -31,7 +31,7 @@ function pickExample(previous?: string | null) {
   return choices[Math.floor(Math.random() * choices.length)]!
 }
 
-export function ChatView({ state, controller, mock = false, embedded = false, automaticHandoff, handoffIssue }: { state: ChatState; controller: ChatController; mock?: boolean; embedded?: boolean; automaticHandoff?: AutomaticHandoffNoticeData; handoffIssue?: string }) {
+export function ChatView({ state, controller, mock = false, embedded = false, automaticHandoff, handoffIssue, handoffOpen = false }: { state: ChatState; controller: ChatController; mock?: boolean; embedded?: boolean; automaticHandoff?: AutomaticHandoffNoticeData; handoffIssue?: string; handoffOpen?: boolean }) {
   const [placeholder, setPlaceholder] = useState(() => {
     try { return pickExample(sessionStorage.getItem(exampleKey)) } catch { return pickExample() }
   })
@@ -137,16 +137,17 @@ export function ChatView({ state, controller, mock = false, embedded = false, au
         </section>}
         {state.updatedOffer && <section className="updated-offer"><h2>Обновлённое предложение</h2><OfferCard offer={state.updatedOffer} selected={false} disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
         {selected && !selectedInHistory && <section className="updated-offer"><h2>Выбранное предложение</h2><OfferCard offer={selected} selected disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
-        {state.session?.price_terms && <div className="conversation-actions">
-          <p>За позицию: {state.session.price_terms.base_amount} {state.session.price_terms.currency}
-            {' · '}Скидка {state.session.price_terms.discount_percent}%
-            {' · '}Итого {state.session.price_terms.final_amount} {state.session.price_terms.currency}</p>
-        </div>}
+        {state.session?.price_terms && <section className="sales-terms" aria-label="Условия предложения">
+          <h2>Условия предложения</h2><p className="muted">За единицу выбранной позиции. Суммы подтверждены сервером.</p>
+          <dl><div><dt>Базовая цена</dt><dd>{formatPrice({ amount: state.session.price_terms.base_amount, currency: state.session.price_terms.currency })}</dd></div>
+            <div><dt>Скидка</dt><dd>{state.session.price_terms.discount_percent}%</dd></div>
+            <div><dt>Итого за единицу</dt><dd>{formatPrice({ amount: state.session.price_terms.final_amount, currency: state.session.price_terms.currency })}</dd></div></dl>
+        </section>}
         {state.session && messages.length > 0 && state.session.quotes_enabled && selected && !busy && <div className="conversation-actions">
           <QuoteDraftAction key={`${state.session.session_id}:${selected.offer_id}:${selected.catalog_version}:${state.session.last_turn?.turn_id}`} sessionId={state.session.session_id} demo={mock} onRefresh={() => void controller.recover()} onOfferChanged={controller.showUpdatedOffer} />
         </div>}
-        {state.session?.support_topic && !busy && <div className="conversation-actions">
-          <button type="button" className="quiet-action" onClick={() => void controller.send('Не помогло')}>Не помогло</button>
+        {state.session?.support_topic && !busy && !handoffOpen && <div className="conversation-actions">
+          <button type="button" className="quiet-action" onClick={() => { setFollowing(true); void controller.send('Не помогло') }}>Не помогло</button>
         </div>}
         <AutomaticHandoffNotice notice={automaticHandoff} />
         {handoffIssue && <p className="handoff-sync-issue muted" role="status">{handoffIssue}</p>}
@@ -185,5 +186,5 @@ export function ChatPage({ embedded = false }: { embedded?: boolean }) {
     message: handoff.status === 'resolved' ? 'Вы можете продолжить диалог с ИИ-консультантом.' : handoff.status === 'queued' ? 'Ожидаем специалиста. Вы можете добавить уточнения в этот диалог.' : 'Специалист работает с обращением. Продолжайте переписку здесь.',
     caseReference: handoff.handoff_id,
   } : undefined
-  return <ChatView state={state} controller={controller} mock={import.meta.env.MODE === 'mock'} embedded={embedded} automaticHandoff={notice} handoffIssue={issue} />
+  return <ChatView state={state} controller={controller} mock={import.meta.env.MODE === 'mock'} embedded={embedded} automaticHandoff={notice} handoffIssue={issue} handoffOpen={!!handoff && handoff.status !== 'resolved'} />
 }

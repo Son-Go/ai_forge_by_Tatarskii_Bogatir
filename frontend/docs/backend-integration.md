@@ -1,5 +1,12 @@
 # Интеграция Frontend с Backend — 27.11.2026
 
+Для `frontend_v2` актуальна сверка всех четырёх уточнений организаторов:
+[hackathon-clarifications.md](hackathon-clarifications.md). Основа — командная
+`hackathon-clarifications` (`8cad90f`), а не устаревшая `fast_api_server_v2`.
+Поддерживаются `support_topic`, `price_terms`, `OfferCard.selectable`, причины
+`instruction_failed` / `payment_deferral` и `sales_context` назначенного обращения.
+Ни разрешение выбора, ни скидка, ни решение о передаче не вычисляются Frontend.
+
 Frontend реализует оба переданных OpenAPI. Неизменённые входные копии находятся
 в frontend/contracts; исходные общий contracts/, Backend, ML и архитектура не менялись.
 Схемы/происхождение: [../contracts/README.md](../contracts/README.md).
@@ -13,7 +20,7 @@ Frontend реализует оба переданных OpenAPI. Неизмен�
 | Выбор | POST sessions/{id}/selection | offer_id/catalog_version, OFFER_CHANGED и подтверждение |
 | КП | POST sessions/{id}/quote-drafts → PDF | JSON QuoteRequest: customer_name 1..160, quantity 1..99999; MIME/%PDF-, отмена/ошибки/скачивание |
 | Клиентский статус | GET sessions/{id}/handoff → {handoff:null|Handoff} | После done/restore; пока queued/in_progress — polling статуса и истории; resolved возвращает к ИИ |
-| Очередь | GET manager/handoffs?limit=50&offset=N → QueueItem[] | Bearer, offset pagination, polling 5с, локальный поиск/фильтр только текущей страницы |
+| Очередь | GET manager/handoffs?limit=51&offset=N → QueueItem[] | Bearer, страницы по 50 + один элемент для определения следующей, polling 5с, локальный поиск/фильтр только текущей страницы |
 | Назначение | POST manager/handoffs/{id}/claim → QueueItem | Явное взятие queued; состояние только из ответа сервера |
 | Контекст | GET manager/handoffs/{id} → {handoff,messages} | Доступ назначенного обращения; 404 не трактуется как доказанное владение |
 | Ответ | POST manager/handoffs/{id}/messages → ChatMessage | UUID message_id + text 1..4000, явный повтор того же текста с тем же ID, без автоповтора POST |
@@ -30,8 +37,8 @@ App, очищается при выходе/401/reload. Отдельного log
 queued/in_progress/resolved отображаются как «Ожидает решения»/«В работе»/«Завершено».
 Компактный select 210px — «Все», «Ожидают», «В работе», «Завершённые».
 У API нет общего total и глобального фильтра/поиска. UI подписывает область текущей
-страницы; при 50 элементах позволяет следующую, при <50 отключает Далее. Пустая
-страница после ровно полного последнего блока допустима, Назад остаётся доступна.
+страницы; дополнительный 51-й элемент определяет наличие следующей страницы.
+При его отсутствии кнопка Далее скрыта; Назад доступна со второй страницы.
 Polling последовательный, без накладывающихся запросов, отменяется при уходе/смене
 страницы/обращения. Скрытая вкладка откладывает опрос. Сетевой сбой не выдаёт старую
 страницу за свежую: ошибка видна. 401 очищает менеджерский доступ.
@@ -65,8 +72,8 @@ Backend. Клиент проверяет тип/сигнатуру, фиксир
 400/403/404/409/429/503; OFFER_CHANGED требует обновления/подтверждения, не автоповтора.
 
 Java при создании КП возвращает `X-Quote-Id` и `X-Invoice-Drafts-Enabled` вместе с PDF.
-Кнопка «Одобрить КП» отправляет `POST /api/v1/sessions/{session_id}/quote-drafts/{quote_id}/approval`.
-После подтверждения можно скачать счёт для согласования через `POST /api/v1/sessions/{session_id}/invoice-drafts`
+Кнопка «Одобрить КП и получить счёт» отправляет `POST /api/v1/sessions/{session_id}/quote-drafts/{quote_id}/approval`.
+После подтверждения тем же действием запрашивается счёт для согласования через `POST /api/v1/sessions/{session_id}/invoice-drafts`
 с телом `{"quote_id":"<UUID>"}`. Первая выдача повторно сверяет условия, а повторная возвращает сохранённый PDF.
 При `OFFER_CHANGED` интерфейс показывает актуальную карточку. После выбора нужно заново сформировать и одобрить КП.
 PDF содержит справочные реквизиты ПАО «Софтлайн». Для счёта на оплату осталось согласовать

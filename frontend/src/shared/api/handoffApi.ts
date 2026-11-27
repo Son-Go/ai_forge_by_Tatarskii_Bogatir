@@ -21,7 +21,7 @@ export function isHandoff(v: unknown): v is Handoff {
 }
 export const isQueueItem = (v: unknown): v is QueueItem => isHandoff(v) && 'session_id' in v && uuid(v.session_id)
 const isSalesContext = (v: unknown) => record(v) && (v.offer === null || isOffer(v.offer))
-  && (v.quote === null || (record(v.quote) && uuid(v.quote.quote_id) && Number.isInteger(v.quote.quantity)
+  && (v.quote === null || (record(v.quote) && uuid(v.quote.quote_id) && Number.isInteger(v.quote.quantity) && Number(v.quote.quantity) >= 1
     && typeof v.quote.approved === 'boolean'
     && (v.quote.discount_percent === undefined || typeof v.quote.discount_percent === 'string')
     && optionalText(v.quote.agreed_total) && (v.quote.price == null || isPrice(v.quote.price))))

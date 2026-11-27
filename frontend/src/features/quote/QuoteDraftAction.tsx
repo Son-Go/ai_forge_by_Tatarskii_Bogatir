@@ -32,6 +32,7 @@ export function QuoteDraftAction({ sessionId, demo, onRefresh, onOfferChanged }:
       if (current.signal.aborted) return
       setNotice('')
       if (cause instanceof ApiError && ['OFFER_CHANGED', 'QUOTE_SUPERSEDED', 'QUOTE_NOT_FOUND'].includes(cause.body.code)) setQuote(null)
+      if (cause instanceof ApiError && cause.body.code === 'QUOTE_APPROVAL_REQUIRED') setQuote((current) => current && { ...current, approved: false })
       if (cause instanceof ApiError && cause.body.code === 'OFFER_CHANGED') onOfferChanged(cause.body.updated_offer)
       setError(cause instanceof ApiError && cause.body.code === 'OFFER_CHANGED'
         ? 'Предложение изменилось. Подтвердите актуальную карточку, затем сформируйте и одобрите новое КП.'
