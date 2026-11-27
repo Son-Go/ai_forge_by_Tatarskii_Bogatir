@@ -1,0 +1,5 @@
+services:
+  panel:
+    command: ["/app/.venv/bin/uvicorn", "fixture.mock_app:make_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", "--no-access-log"]
+    volumes:
+      - "${PANEL_FIXTURES:?Set PANEL_FIXTURES}:/app/fixture:ro"

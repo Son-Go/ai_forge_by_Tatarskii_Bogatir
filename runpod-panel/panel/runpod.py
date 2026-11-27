@@ -191,6 +191,7 @@ class Runpod:
             last = timestamp(points[-1][0]) if points else None
             result[field] = {
                 "points": points,
+                "end_at": now.isoformat(),
                 "status": "unavailable"
                 if last is None
                 else ("stale" if now - last > timedelta(hours=2) else "current"),
@@ -281,6 +282,7 @@ class Runpod:
                     "model": self.config.model,
                     "messages": [{"role": "user", "content": "Reply with exactly OK. /no_think"}],
                     "max_tokens": 16,
+                    "chat_template_kwargs": {"enable_thinking": False},
                     "temperature": 0,
                     "stream": False,
                 },

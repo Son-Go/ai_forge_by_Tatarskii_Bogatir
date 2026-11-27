@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Runpod</title>
+  <link rel="stylesheet" href="/assets/panel.css">
+  <script type="module" src="/assets/panel.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#overview"><span class="brand-icon" aria-hidden="true"></span>Runpod <small>Serverless</small></a>
+    <nav id="navigation" data-aria="nav">
+      <a href="#overview" data-page="overview"><span class="nav-icon" aria-hidden="true">▤</span><span data-i="overview"></span></a>
+      <a href="#workers" data-page="workers"><span class="nav-icon" aria-hidden="true">▥</span><span data-i="workers"></span></a>
+      <a href="#settings" data-page="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span data-i="settings"></span></a>
+      <a href="#costs" data-page="costs"><span class="nav-icon" aria-hidden="true">▧</span><span data-i="costs"></span></a>
+    </nav>
+    <div class="languages" role="group" data-aria="language">
+      <button type="button" data-lang="ru" lang="ru">RU</button>
+      <button type="button" data-lang="en" lang="en">EN</button>
+    </div>
+  </aside>
+
+  <main>
+    <header class="page-header">
+      <div>
+        <p id="endpoint-name" class="eyebrow">Runpod Serverless</p>
+        <h1 id="page-title"></h1>
+      </div>
+      <button id="refresh" type="button" data-i="refresh"></button>
+    </header>
+    <div id="network-status" class="message warning" role="status" hidden></div>
+    <div id="write-status" class="message" role="status" hidden></div>
+    <p id="application-readiness" class="muted" hidden></p>
+    <div id="pending-review" class="message warning" hidden>
+      <p data-i="review_hint"></p>
+      <button id="review" type="button" data-i="review"></button>
+    </div>
+
+    <section id="overview" class="view">
+      <div class="section-heading">
+        <h2 data-i="actual_workers"></h2>
+        <span class="muted" id="worker-observed"></span>
+      </div>
+      <div class="tiles" id="actual-tiles">
+        <article class="tile"><span data-i="ready"></span><strong id="ready"></strong></article>
+        <article class="tile"><span data-i="busy"></span><strong id="busy"></strong></article>
+        <article class="tile"><span data-i="starting"></span><strong id="starting"></strong></article>
+        <article class="tile"><span data-i="problem"></span><strong id="problem"></strong></article>
+      </div>
+      <p id="rollout-status" class="muted"></p>
+      <div class="split">
+        <article class="card">
+          <h2 data-i="configured_workers"></h2>
+          <dl class="stats">
+            <div><dt data-i="active"></dt><dd id="active-stat"></dd></div>
+            <div><dt data-i="max"></dt><dd id="max-stat"></dd></div>
+          </dl>
+          <a href="#workers" class="text-link" data-i="manage_workers"></a>
+        </article>
+        <article class="card">
+          <h2 data-i="probe_heading"></h2>
+          <p class="muted" data-i="probe_hint"></p>
+          <button type="button" id="probe" data-i="probe"></button>
+          <p id="probe-result" class="probe-result" role="status" hidden></p>
+        </article>
+      </div>
+      <div class="section-heading metric-heading">
+        <h2 data-i="metrics"></h2>
+        <span class="muted" data-i="hourly"></span>
+      </div>
+      <div class="chart-grid" id="charts"></div>
+    </section>
+
+    <section id="workers" class="view" hidden>
+      <article class="card">
+        <h2 data-i="profiles"></h2>
+        <p class="muted"><span data-i="max_explanation"></span> <span id="concurrency"></span></p>
+        <div class="profiles">
+          <button type="button" data-profile="economy"><span data-i="economy"></span><strong>0 / 1</strong></button>
+          <button type="button" data-profile="always_ready"><span data-i="always_ready"></span><strong>1 / 1</strong></button>
+          <button type="button" data-profile="autoscaling"><span data-i="autoscaling"></span><strong>0 / 2</strong></button>
+          <button type="button" data-profile="ready_with_capacity"><span data-i="ready_with_capacity"></span><strong>1 / 2</strong></button>
+        </div>
+      </article>
+      <article class="card">
+        <h2 data-i="worker_limits"></h2>
+        <form id="worker-form">
+          <fieldset disabled>
+            <div class="form-grid three">
+              <label><span data-i="active"></span><input name="active" type="number" min="0" step="1" required><small data-i="active_hint"></small></label>
+              <label><span data-i="max"></span><input name="max" type="number" min="0" step="1" required><small data-i="max_hint"></small></label>
+              <label><span data-i="idle_timeout"></span><input name="idle_timeout" type="number" min="1" max="3600" step="1"><small id="idle-hint"></small></label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="primary" data-i="preview_change"></button>
+              <button type="button" data-reload="worker-form" data-i="reload_fields"></button>
+            </div>
+          </fieldset>
+        </form>
+      </article>
+      <article class="card">
+        <h2 data-i="warm_heading"></h2>
+        <p class="muted" data-i="warm_hint"></p>
+        <p class="timer-status" id="timer-status" role="status"></p>
+        <button id="warm" type="button" data-i="warm"></button>
+      </article>
+    </section>
+
+    <section id="settings" class="view" hidden>
+      <article class="card">
+        <h2 data-i="endpoint_settings"></h2>
+        <p id="endpoint-type" class="muted"></p>
+        <form id="settings-form">
+          <fieldset disabled>
+            <div class="form-grid">
+              <label><span data-i="name"></span><input name="name" maxlength="128" required><small data-i="name_hint"></small></label>
+              <label><span data-i="image"></span><input name="image" maxlength="512" required><small data-i="image_hint"></small></label>
+              <label><span data-i="scaling"></span>
+                <select name="scaling_type">
+                  <option value="QUEUE_DELAY" data-i="QUEUE_DELAY"></option>
+                  <option value="REQUEST_COUNT" data-i="REQUEST_COUNT"></option>
+                </select>
+                <small data-i="scaling_hint"></small>
+              </label>
+              <label><span id="threshold-label"></span><input name="threshold" type="number" required><small id="threshold-hint"></small></label>
+              <label><span data-i="execution_timeout"></span><input name="execution_timeout" type="number" min="5000" max="604800000" step="1" required><small data-i="execution_hint"></small></label>
+              <label><span data-i="flashboot"></span>
+                <select name="flashboot">
+                  <option value="OFF" data-i="OFF"></option>
+                  <option value="FLASHBOOT" data-i="FLASHBOOT"></option>
+                  <option value="PRIORITY_FLASHBOOT" data-i="PRIORITY_FLASHBOOT"></option>
+                </select>
+                <small data-i="flashboot_hint"></small>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="primary" data-i="preview_change"></button>
+              <button type="button" data-reload="settings-form" data-i="reload_fields"></button>
+            </div>
+          </fieldset>
+        </form>
+      </article>
+      <article class="card">
+        <h2 data-i="environment"></h2>
+        <p class="muted" data-i="environment_hint"></p>
+        <ul class="env-list" id="environment"></ul>
+      </article>
+    </section>
+
+    <section id="costs" class="view" hidden>
+      <div class="section-heading">
+        <h2 data-i="actual_costs"></h2>
+        <a id="grafana" class="text-link" target="_blank" rel="noopener noreferrer" data-i="grafana"></a>
+      </div>
+      <p class="muted" data-i="billing_hint"></p>
+      <div class="tiles" id="cost-tiles"></div>
+      <article class="card">
+        <div class="section-heading">
+          <h2 data-i="daily_costs"></h2>
+          <label class="range-label"><span data-i="billing_period"></span>
+            <select id="billing-period"><option value="today" data-i="today"></option><option value="week" data-i="week"></option><option value="month" data-i="month" selected></option></select>
+          </label>
+        </div>
+        <div id="daily-costs"></div>
+      </article>
+      <article class="card">
+        <h2 data-i="current_estimate"></h2>
+        <div id="current-estimate"></div>
+      </article>
+    </section>
+  </main>
+
+  <dialog id="confirmation" aria-labelledby="confirm-title">
+    <div class="dialog-body">
+      <h2 id="confirm-title" data-i="confirm_title"></h2>
+      <div id="diff"></div>
+      <div id="confirm-warnings"></div>
+      <h3 data-i="estimate"></h3>
+      <div id="change-estimate"></div>
+      <div class="form-actions modal-actions">
+        <button id="cancel" type="button" data-i="cancel"></button>
+        <button id="apply" type="button" class="primary" data-i="apply"></button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>
