@@ -11,6 +11,14 @@ Spring Boot вызывает FastAPI по адресу `http://ml-service:8000` 
 
 Ошибка входа возвращается с HTTP 400, ошибка авторизации — 401, проблема модели до начала потока — 503. Коды `MODEL_TIMEOUT`, `MODEL_UNAVAILABLE` и `MODEL_INVALID_OUTPUT` также передаются в SSE `failed`, если поток уже открыт. Закрытие внутреннего SSE закрывает соединение с RunPod. Обработку повторов хода выполняет Java.
 
+## Контрольный прогон модели
+
+Из корня репозитория запустите сценарии поддержки, возражения о цене, отсрочки и композиции подтверждённых фактов. Скрипт передаёт настроенному профилю из `.env` только синтетические реплики и факты.
+
+```bash
+PYTHONPATH=ml-service uv run --project ml-service --env-file .env python ml-service/tests/live_clarifications.py
+```
+
 ## Профиль RunPod
 
 1. Разверните RunPod Serverless endpoint на vLLM. Для базовой проверки подходит `MODEL_NAME=Qwen/Qwen3-32B-AWQ`. Для командного релиза укажите репозиторий AWQ-весов и зафиксируйте `MODEL_REVISION`. При использовании приватных весов передайте `HF_TOKEN` через секреты RunPod. [Переменные воркера vLLM](https://docs.runpod.io/serverless/vllm/environment-variables).
