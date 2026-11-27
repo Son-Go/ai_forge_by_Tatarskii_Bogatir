@@ -33,6 +33,7 @@ from .schemas import (
     FaqReviewRequest,
     FaqReviewResult,
     Health,
+    IntentSignal,
     Interpretation,
     InterpretRequest,
     InterpretResult,
@@ -131,6 +132,10 @@ async def interpret(
                 updates.append(ClearUpdate(op="clear", field=update.field))
             else:
                 updates.append(update)
+        signals: dict[str, IntentSignal] = {}
+        for signal in interpretation.signals:
+            if signal.evidence in body.text:
+                signals.setdefault(signal.kind, signal)
         call.succeeded = True
     response.headers["X-Prompt-Version"] = prompts.INTERPRET_VERSION
     return InterpretResult(
@@ -139,7 +144,7 @@ async def interpret(
         updates=updates,
         clarification_candidates=interpretation.clarification_candidates,
         model_version=provider.model_version,
-        signals=[s for s in interpretation.signals if s.evidence in body.text],
+        signals=list(signals.values()),
     )
 
 

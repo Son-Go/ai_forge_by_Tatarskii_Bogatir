@@ -371,13 +371,17 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
     async with client_for(settings, handler) as client:
         response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
     assert response.status_code == 200
-    assert response.headers["X-Prompt-Version"] == "interpret-3"
+    assert response.headers["X-Prompt-Version"] == "interpret-4"
     assert response.json() == RESULT | {"model_version": "release-a", "signals": []}
 
 
 @pytest.mark.parametrize(
     "text,kind",
     [
+        ("Лицензию оплатил вчера, письма с ключом всё ещё нет", "key_delivery"),
+        ("Получил серию, приложение её не принимает", "key_activation"),
+        ("Как вернуть уже оплаченную лицензию?", "refund"),
+        ("Попробовал, результат тот же", "instruction_failed"),
         ("Мне дорого", "price_objection"),
         ("Для нас эта цена слишком высокая", "price_objection"),
         ("Хочу отсрочку", "payment_deferral"),
@@ -388,12 +392,39 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
 )
 async def test_interpret_signals_require_current_text_evidence(settings, text, kind):
     expected = [{"kind": kind, "evidence": text}] if kind else []
-    upstream = RESULT | {"updates": [], "signals": [
-        *expected, {"kind": "key_delivery", "evidence": "Ключ не пришёл"},
-    ]}
+    previous_text = "Ключ не пришёл"
+    upstream = RESULT | {
+        "updates": [],
+        "signals": [{"kind": "key_delivery", "evidence": previous_text}, *expected],
+    }
+    history = [
+        {"role": "user", "text": previous_text},
+        {"role": "assistant", "text": "Проверьте письма в спаме."},
+    ]
     async with client_for(settings, lambda _: completion(upstream)) as client:
         response = await client.post(
-            "/internal/v1/interpret", json=INTERPRET | {"text": text}, headers=AUTH
+            "/internal/v1/interpret",
+            json=INTERPRET | {"text": text, "conversation_context": history},
+            headers=AUTH,
+        )
+    assert response.status_code == 200
+    assert response.json()["signals"] == expected
+
+
+async def test_interpret_keeps_both_current_signals_and_drops_duplicate_kinds(settings):
+    expected = [
+        {"kind": "price_objection", "evidence": "Мне дорого"},
+        {"kind": "payment_deferral", "evidence": "можно заплатить позже?"},
+    ]
+    upstream = RESULT | {
+        "updates": [],
+        "signals": [*expected, {"kind": "price_objection", "evidence": "дорого"}],
+    }
+    async with client_for(settings, lambda _: completion(upstream)) as client:
+        response = await client.post(
+            "/internal/v1/interpret",
+            json=INTERPRET | {"text": "Мне дорого, можно заплатить позже?"},
+            headers=AUTH,
         )
     assert response.status_code == 200
     assert response.json()["signals"] == expected
