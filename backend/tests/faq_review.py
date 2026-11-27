@@ -25,6 +25,8 @@ TIMEOUT_ANSWER = "Чтобы открыть настройки профиля, �
 OWNER = "owner_test_" + "a" * 43
 OTHER = "other_test_" + "b" * 43
 TOKEN = "faq-test-only"
+DEFERRED_PAYMENT = "Мне дорого, можно рассчитаться через 30 дней?"
+NEGATED_DEFERRAL = "Отсрочка нам не нужна"
 
 
 class ReviewMock(BaseHTTPRequestHandler):
@@ -47,11 +49,18 @@ class ReviewMock(BaseHTTPRequestHandler):
         assert self.headers["Authorization"] == f"Bearer {TOKEN}"
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/internal/v1/interpret":
+            self.server.interpreted.append(data["text"])
             handoff = data["text"] in self.server.handoff_questions
             self.server.handoff_questions.discard(data["text"])
             result = {"intent": "known_product" if handoff else "product_question",
                       "product_query": "MissingDemoProduct" if handoff else data["text"],
                       "updates": [], "clarification_candidates": [], "model_version": "fixture"}
+            if data["text"] == DEFERRED_PAYMENT:
+                result["signals"] = [{"kind": "price_objection", "evidence": "Мне дорого"},
+                                     {"kind": "payment_deferral", "evidence": "рассчитаться через 30 дней"}]
+            if data["text"] == NEGATED_DEFERRAL:
+                # A model mistake must not override an explicit rejection.
+                result["signals"] = [{"kind": "payment_deferral", "evidence": "Отсрочка"}]
         elif self.path == "/internal/v1/compose":
             self.server.compositions += 1
             return self.send_payload(b'event: complete\ndata: {"prompt_version":"fixture"}\n\n', "text/event-stream")
@@ -98,9 +107,9 @@ def exercise(origin, mock, sql):
         body, headers = call("/api/v1/sessions", "POST", expected=201)
         return f"/api/v1/sessions/{body['session_id']}", headers["Set-Cookie"].split(";", 1)[0]
 
-    def ask(path, cookie, text):
+    def ask(path, cookie, text, message_id=None):
         stream, _ = call(path + "/messages", "POST", cookie=cookie,
-                         body={"client_message_id": str(uuid4()), "text": text})
+                         body={"client_message_id": message_id or str(uuid4()), "text": text})
         assert "event:done" in stream
         return call(path, cookie=cookie)[0]["messages"][-1]
 
@@ -232,18 +241,44 @@ def exercise(origin, mock, sql):
         call(path_manager + "/claim", "POST", token=OWNER)
         assert instruction in call(path_manager, token=OWNER)[0]["messages"]
 
-    path, cookie = new_session()
-    offer = ask(path, cookie, "Fixture")["cards"][0]
+    def select_fixture():
+        path, cookie = new_session()
+        offer = ask(path, cookie, "Fixture")["cards"][0]
+        call(path + "/selection", "POST", cookie=cookie, body={
+            "offer_id": offer["offer_id"], "catalog_version": offer["catalog_version"],
+        })
+        return path, cookie, offer
+
+    other_path, other_cookie, _ = select_fixture()
+    ask(other_path, other_cookie, "Нет")
+    other_id = other_path.rsplit("/", 1)[1]
+    assert sql(f"SELECT coupon_state IS NULL FROM chat_sessions WHERE session_id = '{other_id}';") == "t"
+    assert "купон" in ask(other_path, other_cookie, "Мне дорого")["text"].lower()
+    assert "100 RUB" in ask(other_path, other_cookie, "Сколько стоит?")["text"]
+    ask(other_path, other_cookie, "Нет")
+    assert sql(f"SELECT coupon_state IS NULL FROM chat_sessions WHERE session_id = '{other_id}';") == "t"
+    assert "купон" in ask(other_path, other_cookie, "Мне дорого")["text"].lower()
+    ask(other_path, other_cookie, "Да")
+    assert sql(f"SELECT coupon_state FROM chat_sessions WHERE session_id = '{other_id}';") == "present"
+    assert "100 RUB" in ask(other_path, other_cookie, "Сколько стоит?")["text"]
+    ask(other_path, other_cookie, "Нет")
+    assert sql(f"SELECT coupon_state FROM chat_sessions WHERE session_id = '{other_id}';") == "present"
+    assert "price_terms" not in call(other_path, cookie=other_cookie)[0]
+    direct_deferral = "Дорого, можно оплатить с отсрочкой?"
+    ask(other_path, other_cookie, direct_deferral)
+    assert call(other_path + "/handoff", cookie=other_cookie)[0]["handoff"]["reason"] == "payment_deferral"
+    assert direct_deferral not in mock.interpreted
+
+    path, cookie, offer = select_fixture()
     assert offer["availability"] == "unavailable" and offer["selectable"] and offer["price"]["amount"] == "100"
-    call(path + "/selection", "POST", cookie=cookie, body={
-        "offer_id": offer["offer_id"], "catalog_version": offer["catalog_version"],
-    })
+    for question in (NEGATED_DEFERRAL, "Какие способы оплаты?"):
+        ask(path, cookie, question)
+        assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+    assert NEGATED_DEFERRAL in mock.interpreted
     assert "100 RUB" in ask(path, cookie, "Сколько стоит? Купона нет.")["text"]
     assert "price_terms" not in call(path, cookie=cookie)[0]
-    assert "купон" in ask(path, cookie, "Для нас это слишком дорого")["text"].lower()
-    ask(path, cookie, "Купон есть")
-    assert "price_terms" not in call(path, cookie=cookie)[0]
-    assert "95 RUB" in ask(path, cookie, "Купона нет")["text"]
+    assert "купон" in ask(path, cookie, "Мне дорого")["text"].lower()
+    assert "95 RUB" in ask(path, cookie, "Нет")["text"]
     assert call(path, cookie=cookie)[0]["price_terms"] == {
         "base_amount": "100", "discount_percent": "5", "final_amount": "95", "currency": "RUB",
     }
@@ -255,15 +290,24 @@ def exercise(origin, mock, sql):
                 expected=409)[0]["code"] == "QUOTE_APPROVAL_REQUIRED"
     for _ in range(2):
         call(path + f"/quote-drafts/{quote_id}/approval", "POST", cookie=cookie, expected=204)
-    invoice, _ = call(path + "/invoice-drafts", "POST", cookie=cookie, body={"quote_id": quote_id})
-    assert call(path + "/invoice-drafts", "POST", cookie=cookie, body={"quote_id": quote_id})[0] == invoice
+    invoice, headers = call(path + "/invoice-drafts", "POST", cookie=cookie, body={"quote_id": quote_id})
+    invoice_number = headers["X-Invoice-Number"]
+    assert headers["X-Invoice-Purpose"] == "test_payment" and invoice_number.startswith("TEST-")
+    repeated_invoice, repeated_headers = call(path + "/invoice-drafts", "POST", cookie=cookie, body={"quote_id": quote_id})
+    assert repeated_invoice == invoice and repeated_headers["X-Invoice-Number"] == invoice_number
     for pdf in (quote, invoice):
         text = subprocess.check_output(["pdftotext", "-", "-"], input=pdf).decode()
-        assert "190" in text and "5%" in text
+        assert "95" in text and "190" in text and "5%" in text
+    assert "Счёт на оплату" in text and "Сумма по счёту: 190 RUB" in text and invoice_number in text
     assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
-    ask(path, cookie, "Дорого, можно оплатить с отсрочкой?")
+    message_id = str(uuid4())
+    reply = ask(path, cookie, DEFERRED_PAYMENT, message_id)
+    assert mock.interpreted.count(DEFERRED_PAYMENT) == 1 and "скидк" not in reply["text"].lower()
     handoff = call(path + "/handoff", cookie=cookie)[0]["handoff"]
     assert handoff["reason"] == "payment_deferral"
+    assert ask(path, cookie, DEFERRED_PAYMENT, message_id) == reply
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"] == handoff
+    assert sql(f"SELECT count(*) FROM chat_handoffs WHERE session_id = '{path.rsplit('/', 1)[1]}';") == "1"
     path_manager = "/api/v1/manager/handoffs/" + handoff["handoff_id"]
     call(path_manager + "/claim", "POST", token=OWNER)
     sales = call(path_manager, token=OWNER)[0]["sales_context"]
@@ -284,6 +328,7 @@ def run(args):
         mock.compositions = 0
         mock.reviews = []
         mock.timeout_calls = 0
+        mock.interpreted = []
         mock.force_timeout = False
         mock.force_unknown_source = False
         mock.handoff_questions = set()
@@ -308,7 +353,8 @@ def run(args):
                "MANAGER_ACCESS_TOKENS": f"owner={OWNER},other={OTHER}",
                "ML_BASE_URL": f"http://127.0.0.1:{mock.server_port}", "ML_DATA_REGION": "RU", "ML_SERVICE_TOKEN": TOKEN,
                "FAQ_REVIEW_ENABLED": "true", "FAQ_REVIEW_TIMEOUT_MS": "1000", "FAQ_REVIEW_POLL_MS": "150",
-               "CHAT_QUOTES_ENABLED": "true", "CHAT_INVOICE_DRAFTS_ENABLED": "true", "CHAT_DISCOUNT_PERCENT": "5"}
+               "CHAT_QUOTES_ENABLED": "true", "CHAT_INVOICE_DRAFTS_ENABLED": "true",
+               "CHAT_TEST_PAYMENT_INVOICES_ENABLED": "true", "CHAT_DISCOUNT_PERCENT": "5"}
         log = Path(temp, "backend.log")
         with log.open("w") as out:
             java = subprocess.Popen(["java", "-jar", args.jar], env=env, stdout=out, stderr=out)

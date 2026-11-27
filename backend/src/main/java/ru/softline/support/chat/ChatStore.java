@@ -20,9 +20,11 @@ import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -33,6 +35,21 @@ import ru.softline.support.catalog.CatalogSearch;
 
 @Service
 class ChatStore {
+    private static final String COUPON_QUESTION = "У вас есть купон или промокод на эту покупку?";
+    private static final Pattern PRICE_QUESTION = Pattern.compile(
+            "(?:а )?(?:сколько (?:это )?стоит|какая цена|назовите цену)"
+                    + "(?: (?:купона нет|промокода нет|нет купона|нет промокода))?");
+    private static final Pattern PRICE_ONLY_OBJECTION = Pattern.compile(
+            "(?:мне |нам |это |для нас это )?(?:слишком )?дорого");
+    private static final Pattern PRICE_OBJECTION = Pattern.compile(
+            "(?U)\\b(?:дорого|дороговато|слишком дорог[а-я]*|слишком высок[а-я]* цен[а-я]*|выше (?:моего|нашего) бюджета)\\b");
+    private static final Pattern NO_PRICE_OBJECTION = Pattern.compile("(?U)\\bне (?:слишком )?(?:дорог[а-я]*|высок[а-я]*)\\b");
+    private static final Pattern COUPON_ABSENT = Pattern.compile(
+            "(?:у (?:меня|нас) )?(?:нет (?:купона|промокода)|(?:купона|промокода) нет)"
+                    + "(?: на эту покупку)?");
+    private static final Pattern COUPON_PRESENT = Pattern.compile(
+            "(?:у (?:меня|нас) )?(?:есть (?:купон|промокод)|(?:купон|промокод) есть)"
+                    + "(?: на эту покупку)?");
     private static final String TURNS = """
         SELECT t.*, u.body AS user_text
         FROM chat_turns t JOIN chat_messages u ON u.message_id = t.user_message_id
@@ -52,19 +69,22 @@ class ChatStore {
     private final DocumentDraftPdf draftPdf;
     private final boolean quotesEnabled;
     private final boolean invoiceDraftsEnabled;
+    private final boolean testPaymentInvoicesEnabled;
     private final BigDecimal discountLimit;
     private final SecureRandom random = new SecureRandom();
 
     ChatStore(JdbcClient db, ObjectMapper json, CatalogSearch catalog, DocumentDraftPdf draftPdf,
               @Value("${chat.quotes-enabled:false}") boolean quotesEnabled,
               @Value("${chat.invoice-drafts-enabled:false}") boolean invoiceDraftsEnabled,
-              @Value("${chat.discount-percent:0}") BigDecimal discountLimit) {
+              @Value("${chat.test-payment-invoices-enabled:false}") boolean testPaymentInvoicesEnabled,
+              @Value("${chat.discount-percent:5}") BigDecimal discountLimit) {
         this.db = db;
         this.json = json;
         this.catalog = catalog;
         this.draftPdf = draftPdf;
         this.quotesEnabled = quotesEnabled;
         this.invoiceDraftsEnabled = invoiceDraftsEnabled;
+        this.testPaymentInvoicesEnabled = testPaymentInvoicesEnabled;
         if (discountLimit.signum() < 0 || discountLimit.compareTo(BigDecimal.valueOf(5)) > 0
                 || discountLimit.stripTrailingZeros().scale() > 2) {
             throw new IllegalArgumentException("CHAT_DISCOUNT_PERCENT must be between 0 and 5");
@@ -117,17 +137,32 @@ class ChatStore {
         return new HandoffStatus(handoff);
     }
 
-    Reply pricingReply(Turn turn, MlClient.Interpretation interpretation) {
+    Reply directPricingReply(Turn turn) {
         String text = FaqText.key(turn.userText());
-        boolean objection = text.matches("(?s).*(мне дорого|нам дорого|слишком дорог|слишком высок[а-я]* цен|дороговато|выше (моего|нашего) бюджета).*")
-                || !text.contains("не дорого") && ReplyPlanner.signal(interpretation, "price_objection", turn.userText());
-        String coupon = text.matches("(?s).*(нет (?:купона|промокода)|(?:купона|промокода) нет|без (?:купона|промокода)).*")
-                ? "absent" : text.matches("(?s).*(есть (?:купон|промокод)|(?:купон|промокод) есть|у меня (?:купон|промокод)).*")
-                ? "present" : null;
-        boolean priceQuestion = text.matches("(?s)^(?:а )?(?:сколько (?:это )?стоит|какая цена|назовите цену)"
-                + "(?: (?:купона нет|промокода нет|нет купона|нет промокода))?$");
-        if (!objection && coupon == null && !priceQuestion) return null;
+        if (PRICE_QUESTION.matcher(text).matches() || PRICE_ONLY_OBJECTION.matcher(text).matches()
+                || COUPON_PRESENT.matcher(text).matches() || COUPON_ABSENT.matcher(text).matches()
+                || isShortCouponAnswer(turn.userText(), text)) {
+            return pricingReply(turn, null);
+        }
+        return null;
+    }
+
+    Reply pricingReply(Turn turn, MlClient.Interpretation interpretation) {
+        String message = turn.userText();
+        String text = FaqText.key(message);
+        boolean priceQuestion = PRICE_QUESTION.matcher(text).matches();
+        boolean objection = !priceQuestion && !text.startsWith("сколько стоит ")
+                && !NO_PRICE_OBJECTION.matcher(text).find()
+                && (PRICE_OBJECTION.matcher(text).find() || ReplyPlanner.signal(interpretation, "price_objection", message));
+        String coupon = declaredCoupon(message);
+        boolean shortAnswer = isShortCouponAnswer(message, text);
+        if (!objection && coupon == null && !priceQuestion && !shortAnswer) return null;
         PricingState previous = pricing(turn.sessionId());
+        if (shortAnswer) {
+            if (!previous.objection() || previous.coupon() != null || !awaitingCouponAnswer(turn)) return null;
+            coupon = "да".equals(text) ? "present" : "absent";
+        }
+        if (!objection && coupon == null && !priceQuestion) return null;
         JsonNode selected = selectedCard(turn.sessionId());
         if (!selected.path("price").isObject()) {
             return objection ? Reply.text("clarify", "Выберите позицию с ценой, чтобы обсудить условия покупки.") : null;
@@ -150,7 +185,7 @@ class ChatStore {
         BigDecimal percent = "absent".equals(couponState) ? discountLimit : BigDecimal.ZERO;
         PriceTerms terms = priceTerms(current, percent);
         String answer;
-        if (couponState == null) answer = "У вас есть купон или промокод на эту покупку?";
+        if (couponState == null) answer = COUPON_QUESTION;
         else if ("present".equals(couponState)) answer = "Вы можете проверить условия купона или промокода при оформлении заказа.";
         else if (terms == null) answer = "Скидка на эту покупку сейчас не настроена.";
         else answer = "Предлагаю скидку " + terms.discountPercent() + "%. Базовая цена за позицию "
@@ -158,6 +193,35 @@ class ChatStore {
                 + terms.finalAmount() + " " + terms.currency() + ". Итог по количеству будет в КП.";
         return new Reply("answer", List.of(new Fact("f1", answer)), List.of(), List.of(), null, null,
                 new PricingState(true, couponState, percent));
+    }
+
+    private static boolean isShortCouponAnswer(String message, String text) {
+        return ("да".equals(text) || "нет".equals(text)) && !message.contains("?");
+    }
+
+    private boolean awaitingCouponAnswer(Turn turn) {
+        return db.sql("""
+            SELECT previous.role = 'assistant' AND previous.status = 'complete' AND previous.body = ?
+            FROM chat_messages current
+            JOIN chat_messages previous ON previous.session_id = current.session_id AND previous.ordinal < current.ordinal
+            WHERE current.message_id = ? AND NOT EXISTS (
+                SELECT 1 FROM chat_messages later
+                WHERE later.session_id = current.session_id AND later.ordinal > current.ordinal AND later.status = 'complete'
+            )
+            ORDER BY previous.ordinal DESC LIMIT 1
+            """).params(COUPON_QUESTION, turn.userMessageId())
+                .query(Boolean.class).optional().orElse(false);
+    }
+
+    private static String declaredCoupon(String message) {
+        boolean absent = false;
+        for (String clause : message.split("(?<=[.!?,;\\r\\n])")) {
+            if (clause.endsWith("?")) continue;
+            String key = FaqText.key(clause);
+            if (COUPON_PRESENT.matcher(key).matches()) return "present";
+            if (COUPON_ABSENT.matcher(key).matches()) absent = true;
+        }
+        return absent ? "absent" : null;
     }
 
     private PricingState pricing(UUID session) {
@@ -391,7 +455,7 @@ class ChatStore {
         UUID quoteId = UUID.randomUUID();
         BigDecimal discount = pricing(id).percent();
         DocumentDraft draft = documentDraft(card, customer, quantity, discount, null);
-        byte[] pdf = draftPdf.render(draft, DraftKind.QUOTE, quoteId);
+        byte[] pdf = draftPdf.render(draft, DraftKind.QUOTE, quoteId, null);
         db.sql("UPDATE quote_drafts SET invalidated_at = now() WHERE session_id = ? AND invalidated_at IS NULL")
                 .param(id).update();
         db.sql("""
@@ -412,7 +476,7 @@ class ChatStore {
     }
 
     @Transactional(noRollbackFor = ChatError.class, rollbackFor = IOException.class)
-    public byte[] issueInvoice(UUID id, String token, InvoiceDraftRequest input) throws IOException {
+    public IssuedInvoice issueInvoice(UUID id, String token, InvoiceDraftRequest input) throws IOException {
         lockOwner(id, token);
         if (!invoiceDraftsEnabled) {
             throw new ChatError(404, "INVOICE_DRAFTS_DISABLED", "Формирование счёта пока недоступно.");
@@ -421,27 +485,38 @@ class ChatStore {
         UUID quoteId = input.quoteId();
         SavedQuote quote = findQuote(id, quoteId);
         // The session lock serializes the first issue and concurrent replays.
-        if (quote.invoice() != null) return quote.invoice();
+        if (quote.invoice() != null) return new IssuedInvoice(quote.invoice(), quote.invoiceNumber());
+        if (!quotesEnabled) {
+            throw new ChatError(404, "QUOTES_DISABLED", "Формирование КП пока недоступно.");
+        }
         requireCurrentQuote(id, quoteId, quote);
         if (!quote.approved()) {
             throw new ChatError(409, "QUOTE_APPROVAL_REQUIRED", "Сначала одобрите это коммерческое предложение.");
         }
         DocumentDraft draft = documentDraft(quote.card(), quote.customer(), quote.quantity(), quote.discount(), quote.total());
-        byte[] pdf = draftPdf.render(draft, DraftKind.INVOICE, quoteId);
-        db.sql("UPDATE quote_drafts SET invoice_pdf = ? WHERE quote_id = ?").params(pdf, quoteId).update();
-        return pdf;
+        String number = null;
+        if (testPaymentInvoicesEnabled) {
+            long next = db.sql("SELECT nextval('support_test_invoice_number')").query(Long.class).single();
+            number = String.format(Locale.ROOT, "TEST-%08d", next);
+        }
+        byte[] pdf = draftPdf.render(draft, DraftKind.INVOICE, quoteId, number);
+        db.sql("UPDATE quote_drafts SET invoice_pdf = ?, invoice_number = ? WHERE quote_id = ?")
+                .params(pdf, number, quoteId).update();
+        return new IssuedInvoice(pdf, number);
     }
 
     private record SavedQuote(JsonNode card, String customer, int quantity, boolean approved,
-                              boolean invalidated, byte[] invoice, BigDecimal discount, BigDecimal total) {}
+                              boolean invalidated, byte[] invoice, String invoiceNumber,
+                              BigDecimal discount, BigDecimal total) {}
 
     private SavedQuote findQuote(UUID id, UUID quoteId) {
         return db.sql("""
-            SELECT offer_card::text, customer_name, quantity, approved_at, invalidated_at, invoice_pdf, discount_percent, agreed_total
+            SELECT offer_card::text, customer_name, quantity, approved_at, invalidated_at, invoice_pdf, invoice_number,
+                   discount_percent, agreed_total
             FROM quote_drafts WHERE session_id = ? AND quote_id = ?
             """).params(id, quoteId).query((rs, row) -> new SavedQuote(tree(rs.getString("offer_card")),
                     rs.getString("customer_name"), rs.getInt("quantity"), rs.getTimestamp("approved_at") != null,
-                    rs.getTimestamp("invalidated_at") != null, rs.getBytes("invoice_pdf"),
+                    rs.getTimestamp("invalidated_at") != null, rs.getBytes("invoice_pdf"), rs.getString("invoice_number"),
                     rs.getBigDecimal("discount_percent"), rs.getBigDecimal("agreed_total")))
                 .optional().orElseThrow(() -> new ChatError(404, "QUOTE_NOT_FOUND", "Коммерческое предложение не найдено."));
     }

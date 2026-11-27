@@ -156,7 +156,7 @@ class ChatFlow {
         Reply direct = activeHandoff == null ? planner.explicitHandoff(turn.userText())
                 : Reply.handoff(activeHandoff, "Сообщение добавлено к обращению. Менеджер увидит его в этом диалоге.");
         if (direct == null) direct = planner.commercialSupport(turn.userText(), supportTopic, null);
-        if (direct == null) direct = store.pricingReply(turn, null);
+        if (direct == null) direct = store.directPricingReply(turn);
         if (direct != null) {
             finishDirect(turn, emitter, timing, old, direct);
             return;

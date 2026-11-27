@@ -14,6 +14,7 @@ final class ChatTypes {
     record DocumentDraftRequest(String customerName, BigDecimal quantity) {}
     record InvoiceDraftRequest(UUID quoteId) {}
     record QuotePdf(UUID id, boolean invoiceDraftsEnabled, byte[] bytes) {}
+    record IssuedInvoice(byte[] bytes, String number) {}
     record DocumentDraft(String customerName, String name, String vendorCode, int quantity,
                          BigDecimal unitPrice, String currency, BigDecimal discountPercent, BigDecimal agreedTotal) {
         BigDecimal total() {
@@ -34,7 +35,7 @@ final class ChatTypes {
     }
     enum DraftKind {
         QUOTE("Коммерческое предложение", "quote.pdf", "НДС, условия оплаты, срок поставки и срок действия уточняет менеджер."),
-        INVOICE("Счёт", "invoice.pdf", "Оплата по документу не предусмотрена.");
+        INVOICE("Счёт для согласования", "invoice.pdf", "Оплата по документу не предусмотрена.");
 
         final String title;
         final String fileName;

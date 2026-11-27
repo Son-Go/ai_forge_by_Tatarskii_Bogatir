@@ -10,12 +10,22 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 import ru.softline.support.catalog.CatalogSearch;
 import ru.softline.support.catalog.CatalogSearch.Offer;
 
 @Component
 class ReplyPlanner {
+    private static final Pattern DEFERRAL_REQUEST = Pattern.compile(
+            "(?U)\\b(?:хочу|хотим|просим|прошу|нужн[аоы]?|можно|дайте|предоставьте|оформите)"
+                    + "\\b[^.!?,;]{0,60}\\b(?:отсроч[а-я]*|(?:оплатить|заплатить|платить) (?:позже|после поставки))\\b"
+                    + "|\\bотсроч[а-я]*(?: (?:нам|мне))? нужн[аоы]\\b");
+    private static final Pattern NO_DEFERRAL = Pattern.compile(
+            "(?U)\\b(?:отсроч[а-я]*(?: (?:нам|мне|больше|сейчас)){0,2} не (?:нужн[аоы]?|требуется)"
+                    + "|не (?:нужн[аоы]?|надо|просим|прошу|хочу|хотим)(?: (?:нам|мне))? отсроч[а-я]*"
+                    + "|(?:без|отказываемся от|отказываюсь от) отсроч[а-я]*"
+                    + "|не (?:хочу|хотим|нужно|надо) (?:оплатить|заплатить|платить) позже)\\b");
     private static final Map<String, String> QUESTIONS = Map.of(
             "product_name", "Как называется продукт? Если знаете артикул, укажите его.",
             "edition", "Какую редакцию продукта вы хотите подобрать?",
@@ -61,9 +71,7 @@ class ReplyPlanner {
 
     Reply explicitHandoff(String message) {
         String text = normalize(message);
-        boolean request = text.matches("(?s).*(хочу|хотим|просим|прошу|нужн|можно|дайте|предостав|оформ).+");
-        if (request && !negativeDeferral(text)
-                && (text.contains("отсроч") || text.matches("(?s).*(?:оплатить|заплатить) (?:позже|после поставки).*"))) {
+        if (!NO_DEFERRAL.matcher(text).find() && DEFERRAL_REQUEST.matcher(text).find()) {
             return paymentDeferral();
         }
         boolean documentReview = (text.contains("документ") || text.contains("справк"))
@@ -84,7 +92,9 @@ class ReplyPlanner {
 
     Reply commercialSupport(String message, String activeTopic, MlClient.Interpretation interpretation) {
         String text = normalize(message);
-        if (!negativeDeferral(text) && signal(interpretation, "payment_deferral", message)) return paymentDeferral();
+        if (!NO_DEFERRAL.matcher(text).find() && signal(interpretation, "payment_deferral", message)) {
+            return paymentDeferral();
+        }
         if (activeTopic != null && (text.matches("(?s).*(не помогл|не сработал|не решен|не решилась|все равно не).*")
                 || signal(interpretation, "instruction_failed", message))) {
             return Reply.handoff("instruction_failed", "Передали обращение менеджеру. Он увидит историю и инструкцию, которую вы уже попробовали.");
@@ -107,10 +117,6 @@ class ReplyPlanner {
         return interpretation != null && interpretation.signals() != null && interpretation.signals().stream()
                 .anyMatch(signal -> signal != null && kind.equals(signal.kind()) && signal.evidence() != null
                         && !signal.evidence().isBlank() && message.contains(signal.evidence()));
-    }
-
-    private static boolean negativeDeferral(String text) {
-        return text.matches("(?s).*(?:не (?:нужна|нужен|просим|прошу|хочу|нужно) отсроч|отсрочка не нужна).*");
     }
 
     private static Reply paymentDeferral() {

@@ -34,9 +34,10 @@ chat:
   cold-turn-timeout-ms: ${CHAT_COLD_TURN_TIMEOUT_MS:180000}
   model-idle-ms: ${CHAT_MODEL_IDLE_MS:15000}
   parallel-turns: ${CHAT_PARALLEL_TURNS:8}
-  discount-percent: ${CHAT_DISCOUNT_PERCENT:0}
+  discount-percent: ${CHAT_DISCOUNT_PERCENT:5}
   quotes-enabled: ${CHAT_QUOTES_ENABLED:false}
   invoice-drafts-enabled: ${CHAT_INVOICE_DRAFTS_ENABLED:false}
+  test-payment-invoices-enabled: ${CHAT_TEST_PAYMENT_INVOICES_ENABLED:false}
 
 faq:
   review-enabled: ${FAQ_REVIEW_ENABLED:false}

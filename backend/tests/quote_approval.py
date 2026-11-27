@@ -3,6 +3,8 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+from pathlib import Path
+import re
 import subprocess
 import unicodedata
 from urllib.error import HTTPError
@@ -10,7 +12,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
 
-def run(origin, compose_file):
+def run(origin, compose_file, trial_payment=False, invoice_output=None):
     def sql(statement):
         return subprocess.check_output([
             "docker", "compose", "-f", compose_file, "exec", "-T", "postgres",
@@ -93,10 +95,22 @@ def run(origin, compose_file):
     def approve(quote_id, expected=204, owner=cookie):
         return call(base + f"/quote-drafts/{quote_id}/approval", owner, expected=expected)[1]
 
+    def issued_invoice(quote_id):
+        headers, pdf = call(base + "/invoice-drafts", cookie, {"quote_id": quote_id})
+        assert headers.get_filename() == "invoice.pdf" and pdf.startswith(b"%PDF-")
+        number = headers["X-Invoice-Number"]
+        assert headers["X-Invoice-Purpose"] == ("test_payment" if trial_payment else "agreement")
+        if trial_payment:
+            assert number and re.fullmatch(r"TEST-[0-9]{8,}", number)
+        else:
+            assert number is None
+        return pdf, number
+
     def invoice(quote_id, expected=200):
-        headers, payload = call(base + "/invoice-drafts", cookie, {"quote_id": quote_id}, expected)
         if expected == 200:
-            assert headers.get_filename() == "invoice.pdf"
+            return issued_invoice(quote_id)[0]
+        headers, payload = call(base + "/invoice-drafts", cookie, {"quote_id": quote_id}, expected)
+        assert headers["X-Invoice-Number"] is None
         return payload
 
     first = quote(2)
@@ -106,11 +120,19 @@ def run(origin, compose_file):
     approve(first)
     approve(first)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        copies = list(executor.map(invoice, [first, first]))
-    assert copies[0] == copies[1] and copies[0].startswith(b"%PDF-")
-    invoice_text = pdf_text(copies[0])
+        copies = list(executor.map(issued_invoice, [first, first]))
+    assert copies[0] == copies[1]
+    first_pdf, first_number = copies[0]
+    if invoice_output:
+        Path(invoice_output).write_bytes(first_pdf)
+    invoice_text = pdf_text(first_pdf)
     assert "Сумма по счёту: 250 RUB" in invoice_text and f"Основание: одобренное КП {first}" in invoice_text
-    assert "Оплата по документу не предусмотрена" in invoice_text
+    if trial_payment:
+        assert "Счёт на оплату" in invoice_text and f"Номер счёта: {first_number}" in invoice_text
+        assert "Тестовый выпуск" in invoice_text
+        assert sql(f"SELECT invoice_number FROM quote_drafts WHERE quote_id = '{first}';") == first_number
+    else:
+        assert "Счёт для согласования" in invoice_text and "Оплата по документу не предусмотрена" in invoice_text
     for field in (
         "ПАО «Софтлайн»", "ИНН 7736227885", "КПП 774950001", "ОГРН 1027736009333",
         "БИК 044525593", "40702810502300000368", "30101810200000000593",
@@ -124,12 +146,15 @@ def run(origin, compose_file):
     approve(second)
     version = activate(150)
     assert invoice(second, 409)["code"] == "OFFER_CHANGED"
-    assert invoice(first) == copies[0]
+    assert issued_invoice(first) == copies[0]
     call(base + "/selection", cookie, {"offer_id": "synthetic-quote-offer", "catalog_version": str(version)})
     replacement = quote(3)
     assert invoice(replacement, 409)["code"] == "QUOTE_APPROVAL_REQUIRED"
     approve(replacement)
-    assert "Сумма по счёту: 450 RUB" in pdf_text(invoice(replacement))
+    replacement_pdf, replacement_number = issued_invoice(replacement)
+    assert "Сумма по счёту: 450 RUB" in pdf_text(replacement_pdf)
+    if trial_payment:
+        assert first_number != replacement_number
 
     version = activate(150, long_name=True)
     select_in_fixture(version)
@@ -142,12 +167,15 @@ def run(origin, compose_file):
     assert "Конец позиции" in " ".join(pages[-1].split())
     assert "Сумма по счёту: 150 RUB" in pages[-1]
     assert sum("Сумма по счёту:" in page for page in pages) == 1
-    print("PASS: owner scope, approval, concurrent identical PDF, catalog reapproval, invoice fields and pagination")
+    mode = "test payment" if trial_payment else "agreement"
+    print(f"PASS: owner scope, approval, concurrent identical PDF, catalog reapproval, {mode} invoice fields and pagination")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", required=True)
     parser.add_argument("--compose-file", required=True)
+    parser.add_argument("--trial-payment", action="store_true")
+    parser.add_argument("--invoice-output")
     args = parser.parse_args()
-    run(args.origin, args.compose_file)
+    run(args.origin, args.compose_file, args.trial_payment, args.invoice_output)

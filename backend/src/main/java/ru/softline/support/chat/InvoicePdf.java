@@ -16,6 +16,7 @@ import ru.softline.support.chat.ChatTypes.DocumentDraft;
 import ru.softline.support.chat.ChatTypes.DraftKind;
 
 final class InvoicePdf {
+    static final String PAYMENT_TITLE = "Счёт на оплату";
     private static final float LEFT = 42;
     private static final float RIGHT = PDRectangle.A4.getWidth() - LEFT;
     private static final float WIDTH = RIGHT - LEFT;
@@ -30,7 +31,8 @@ final class InvoicePdf {
 
     private InvoicePdf() {}
 
-    static void write(PDDocument document, PDType0Font font, DocumentDraft draft, UUID quoteId, String date)
+    static void write(PDDocument document, PDType0Font font, DocumentDraft draft, UUID quoteId, String date,
+                      String invoiceNumber)
             throws IOException {
         PDImageXObject logo = DocumentDraftPdf.image(document, "/quote/softline-logo.png");
         String product = draft.name();
@@ -47,7 +49,7 @@ final class InvoicePdf {
             PDPage page = new PDPage(PDRectangle.A4);
             document.addPage(page);
             try (PDPageContentStream stream = new PDPageContentStream(document, page)) {
-                float tableTop = writeHeader(stream, font, logo, draft.customerName(), quoteId, date);
+                float tableTop = writeHeader(stream, font, logo, draft.customerName(), quoteId, date, invoiceNumber);
                 float reserve = TABLE_BOTTOM_SPACE + (draft.discountPercent().signum() > 0 ? 16 : 0);
                 int count = Math.min((int) ((tableTop - reserve) / LINE_HEIGHT), lines - offset);
                 float bottom = writeItem(stream, font, cells, currency, tableTop, offset, count);
@@ -65,13 +67,18 @@ final class InvoicePdf {
     }
 
     private static float writeHeader(PDPageContentStream stream, PDType0Font font, PDImageXObject logo,
-                                     String customer, UUID quoteId, String date) throws IOException {
+                                     String customer, UUID quoteId, String date, String invoiceNumber) throws IOException {
         stream.drawImage(logo, LEFT, 768, 139, 139f * logo.getHeight() / logo.getWidth());
-        rightText(stream, font, DraftKind.INVOICE.title, 28, RIGHT, 777, INK);
+        rightText(stream, font, invoiceNumber == null ? DraftKind.INVOICE.title : PAYMENT_TITLE, 28, RIGHT, 777, INK);
         rightText(stream, font, "Дата выставления: " + date, 10, RIGHT, 752, INK);
         fill(stream, ACCENT, LEFT, 737, WIDTH, 2);
         text(stream, font, "Основание: одобренное КП " + quoteId, 10, LEFT, 714, INK);
-        text(stream, font, DraftKind.INVOICE.note, 10, LEFT, 696, ACCENT);
+        if (invoiceNumber == null) {
+            text(stream, font, DraftKind.INVOICE.note, 10, LEFT, 696, ACCENT);
+        } else {
+            text(stream, font, "Номер счёта: " + invoiceNumber, 10, LEFT, 696, INK);
+            text(stream, font, "Тестовый выпуск. Реквизиты приведены для проверки оформления.", 10, LEFT, 678, ACCENT);
+        }
 
         // Published supplier details: https://store.softline.ru/contacts/
         float customerLeft = LEFT + 286;
