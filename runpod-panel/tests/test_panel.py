@@ -163,10 +163,57 @@ def test_settings_show_diff_and_verify_after_rollout(client, mock):
         "problem": 2,
         "stale_workers": 1,
         "current_ready": 1,
+        "inactive_idle": 0,
+        "jobs_in_progress": 2,
+        "runtime_running": 2,
+        "runtime_active": 3,
         "observed_at": None,
     }
     assert "env" not in mock.patches[-1]
     assert preview(client, "settings", env={"HF_TOKEN": "new-secret"})[1].status_code == 422
+
+
+@pytest.mark.parametrize("endpoint_type", ["QUEUE", "LOAD_BALANCER"])
+def test_idle_inventory_without_uptime_is_not_a_ready_worker(client, mock, endpoint_type):
+    mock.config["type"] = endpoint_type
+    mock.idle_uptime = None
+    mock.health["workers"].update(ready=0, running=1, initializing=0, throttled=0, unhealthy=0)
+    mock.health["jobs"]["inProgress"] = 0
+    workers = state(client)["workers"]["data"]
+    assert workers["ready"] == workers["current_ready"] == 0
+    assert workers["inactive_idle"] == 1
+    if endpoint_type == "QUEUE":
+        assert workers["runtime_running"] == workers["runtime_active"] == 1
+        assert workers["jobs_in_progress"] == workers["busy"] == workers["problem"] == 0
+    else:
+        assert "runtime_running" not in workers
+        assert not any(path.endswith("/health") for _, path in mock.calls)
+
+
+def test_queue_health_survives_inventory_failure_without_inventing_busy_count(client, mock):
+    mock.worker_fault = True
+    workers = state(client)["workers"]["data"]
+    assert workers["ready"] == 1
+    assert workers["jobs_in_progress"] == 2
+    assert workers["busy"] is None
+
+
+def test_inventory_used_when_queue_health_fails(client, mock):
+    mock.health_fault = True
+    mock.idle_uptime = None
+    workers = state(client)["workers"]["data"]
+    assert workers["ready"] == 0
+    assert workers["runtime_error"] == "provider_response"
+
+
+def test_probe_reports_local_timeout_separately(client, mock):
+    mock.probe_fault = True
+    mock.config["type"] = "LOAD_BALANCER"
+    assert state(client)["probe_timeout_seconds"] == 120
+    result = client.post("/api/probe").json()
+    assert result["status"] == "probe_timeout"
+    assert result["elapsed_ms"] >= 0
+    assert mock.patches == []
 
 
 def test_confirmation_tied_to_settings_and_requested_change(client, mock):
@@ -278,7 +325,8 @@ def test_billing_metrics_and_probe(client):
     assert metrics["requests"]["data"]["requests"]["status"] == "current"
     assert metrics["requests"]["data"]["execution_p95"]["status"] == "stale"
     assert metrics["cold_starts"]["data"]["cold_starts"]["status"] == "unavailable"
-    assert client.post("/api/probe").json()["status"] == "probe_ok"
+    assert client.post("/api/probe").json()["status"] == "probe_queued"
+    assert client.get("/api/probe").json()["status"] == "probe_ok"
 
 
 def test_pending_warm_is_recovered_after_process_restart(app_factory, mock):
@@ -321,3 +369,51 @@ def test_secret_values_are_not_persisted_for_conflict_checks(client, mock):
     tick(client)
     assert state(client)["timer"]["status"] == "timer_conflict"
     assert mock.patches == [{"workers": {"min": 1}}]
+
+
+def test_queue_probe_uses_one_job_and_reports_progress(client, mock):
+    assert state(client)["probe_timeout_seconds"] == 960
+    assert client.get("/api/probe").json() is None
+    assert client.post("/api/probe").json()["status"] == "probe_queued"
+    mock.probe_status_fault = True
+    pending = client.get("/api/probe").json()
+    assert pending["status"] == "probe_queued"
+    assert pending["status_error"] == "provider_response"
+    mock.probe_status_fault = False
+    mock.probe_job_status = "IN_PROGRESS"
+    assert client.get("/api/probe").json()["status"] == "probe_processing"
+    assert client.post("/api/probe").json()["status"] == "probe_processing"
+    assert len(mock.probe_submissions) == 1
+    assert mock.probe_submissions[0]["policy"] == {"ttl": 960000}
+    mock.probe_job_status = "COMPLETED"
+    result = client.get("/api/probe").json()
+    assert result["status"] == "probe_ok"
+    assert client.get("/api/probe").json() == result
+
+
+def test_queue_probe_reports_last_state_when_local_wait_expires(client, mock):
+    assert client.post("/api/probe").json()["status"] == "probe_queued"
+    client.app.state.control.provider._probe_job.started -= 961
+    assert client.get("/api/probe").json()["status"] == "probe_wait_queue_expired"
+    assert not any("/status/" in path for _, path in mock.calls)
+
+
+def test_uncertain_probe_submission_does_not_retry(client, mock):
+    mock.probe_fault = True
+    assert client.post("/api/probe").json()["status"] == "probe_submission_unknown"
+    assert client.get("/api/probe").json() is None
+    assert len(mock.probe_submissions) == 1
+
+
+@pytest.mark.parametrize(
+    "remote,status",
+    [
+        ("CANCELLED", "probe_cancelled"),
+        ("TIMED_OUT", "probe_provider_timeout"),
+        ("FAILED", "probe_failed"),
+    ],
+)
+def test_queue_probe_reports_provider_terminal_status(client, mock, remote, status):
+    mock.probe_job_status = remote
+    assert client.post("/api/probe").json()["status"] == "probe_queued"
+    assert client.get("/api/probe").json()["status"] == status

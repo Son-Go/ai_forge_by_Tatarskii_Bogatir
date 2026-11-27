@@ -21,7 +21,7 @@ class Config:
     rate_source: str = ""
     ml_concurrency: int | None = None
     grafana_url: str = "http://127.0.0.1:3000/d/runpod-token-usage"
-    probe_seconds: int = 30
+    probe_seconds: int = 960
 
     @classmethod
     def from_environment(cls):
@@ -52,7 +52,7 @@ class Config:
             ml_concurrency=int(os.getenv("PANEL_ML_CONCURRENCY") or "0") or None,
             grafana_url=os.getenv("PANEL_GRAFANA_URL")
             or "http://127.0.0.1:3000/d/runpod-token-usage",
-            probe_seconds=int(os.getenv("PANEL_PROBE_TIMEOUT_SECONDS") or "30"),
+            probe_seconds=int(os.getenv("PANEL_PROBE_TIMEOUT_SECONDS") or "960"),
         )
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", instance.endpoint_id):
             raise ValueError("Invalid PANEL_ENDPOINT_ID")
@@ -72,6 +72,6 @@ class Config:
         url = urlsplit(instance.grafana_url)
         if url.scheme not in {"https", "http"} or not url.hostname or url.username is not None:
             raise ValueError("Invalid PANEL_GRAFANA_URL")
-        if not 1 <= instance.probe_seconds <= 120 or (instance.ml_concurrency or 0) < 0:
+        if not 1 <= instance.probe_seconds <= 1800 or (instance.ml_concurrency or 0) < 0:
             raise ValueError("Invalid panel probe timeout or ML concurrency")
         return instance

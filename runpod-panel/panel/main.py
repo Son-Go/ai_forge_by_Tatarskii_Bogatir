@@ -141,11 +141,29 @@ def create_app(config: Config | None = None, *, transport=None, now=utc_now) -> 
             optional(settings), optional(service.provider.workers)
         )
         current = endpoint["data"]
+        if current and current["type"] == "QUEUE":
+            runtime = await optional(service.provider.queue_health)
+            if runtime["data"] is not None:
+                live = runtime["data"]
+                inventory = workers["data"] or {}
+                actual = inventory | {k: v for k, v in live.items() if v is not None}
+                jobs, busy = live["jobs_in_progress"], inventory.get("busy")
+                # Active jobs show whether any work is in progress. They can share a worker.
+                if jobs == 0:
+                    actual["busy"] = 0
+                elif jobs is not None and (not busy or busy > jobs):
+                    actual["busy"] = None
+                workers = {"data": actual, "error": None}
+            elif workers["data"] is not None:
+                workers["data"]["runtime_error"] = runtime["error"]
         return {
             "endpoint": endpoint,
             "workers": workers,
             **service.status(),
             "probe_enabled": bool(config.inference_key),
+            "probe_timeout_seconds": service.provider.probe_budget(
+                current["type"] if current else None
+            ),
             "ml_concurrency": config.ml_concurrency,
             "grafana_url": config.grafana_url,
             "estimate": service.estimate(current["active"], current["max"]) if current else None,
@@ -182,6 +200,10 @@ def create_app(config: Config | None = None, *, transport=None, now=utc_now) -> 
     @writes.post("/api/review")
     async def review(service: Controller):
         return await service.review()
+
+    @private.get("/api/probe")
+    async def probe_status(service: Controller):
+        return await service.provider.probe_status()
 
     @writes.post("/api/probe")
     async def probe(service: Controller):

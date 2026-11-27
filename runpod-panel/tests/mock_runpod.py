@@ -28,15 +28,63 @@ class RunpodMock:
         self.read_fault = False
         self.worker_fault = False
         self.cost_fault = False
+        self.probe_fault = False
+        self.probe_job_status = "COMPLETED"
+        self.probe_status_fault = False
+        self.probe_submissions = []
+        self.health_fault = False
+        self.idle_uptime = 10
+        self.health = {
+            "jobs": {"inProgress": 2},
+            "workers": {
+                "idle": 0,
+                "ready": 1,
+                "running": 2,
+                "initializing": 1,
+                "throttled": 1,
+                "unhealthy": 1,
+            },
+        }
 
     def __call__(self, request):
         path = request.url.path
         self.calls.append((request.method, path))
+        if path == "/v2/local-endpoint/run":
+            assert request.method == "POST"
+            assert request.headers["Authorization"] == "Bearer inference-test"
+            body = json.loads(request.content)
+            assert body["input"]["openai_route"] == "/v1/chat/completions"
+            assert "exactly OK" in body["input"]["openai_input"]["messages"][0]["content"]
+            self.probe_submissions.append(body)
+            if self.probe_fault:
+                raise httpx.ReadTimeout("fixture timeout", request=request)
+            return httpx.Response(200, json={"id": "probe-fixture", "status": "IN_QUEUE"})
+        if path == "/v2/local-endpoint/status/probe-fixture":
+            assert request.method == "GET"
+            assert request.headers["Authorization"] == "Bearer inference-test"
+            if self.probe_status_fault:
+                return httpx.Response(503)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "probe-fixture",
+                    "status": self.probe_job_status,
+                    "output": [{"choices": [{"message": {"content": "OK"}}]}],
+                },
+            )
         if path.endswith("/chat/completions"):
             assert request.headers["Authorization"] == "Bearer inference-test"
             assert request.method == "POST"
             assert "exactly OK" in request.content.decode()
+            if self.probe_fault:
+                raise httpx.ReadTimeout("fixture timeout", request=request)
             return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if path == "/v2/local-endpoint/health":
+            assert request.method == "GET"
+            assert request.headers["Authorization"] == "Bearer inference-test"
+            return (
+                httpx.Response(503) if self.health_fault else httpx.Response(200, json=self.health)
+            )
         if path.startswith("/v2/billing"):
             assert request.headers["Authorization"] == "Bearer bill-test"
             if self.cost_fault:
@@ -88,7 +136,11 @@ class RunpodMock:
                         "total": 5,
                     },
                     "workers": [
-                        {"status": status, "isStale": status == "RUNNING"}
+                        {
+                            "status": status,
+                            "isStale": status == "RUNNING",
+                            "uptimeSeconds": self.idle_uptime if status == "IDLE" else 60,
+                        }
                         for status in ("IDLE", "RUNNING", "INITIALIZING", "THROTTLED", "UNHEALTHY")
                     ],
                 },

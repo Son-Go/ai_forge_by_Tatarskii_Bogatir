@@ -18,6 +18,9 @@ let costs;
 let localNotice;
 let stateError;
 let probeResult;
+let probePolling = false;
+let probeVersion = 0;
+const probePending = new Set(["probe_queued", "probe_processing"]);
 let confirmation;
 let operation;
 let stateRequest = 0;
@@ -67,7 +70,7 @@ async function request(path, method = "GET", data) {
       method,
       headers: method === "GET" ? {} : { "x-panel-request": "1", "content-type": "application/json" },
       body: data === undefined ? undefined : JSON.stringify(data),
-      signal: AbortSignal.timeout(method === "GET" ? 15000 : path === "/api/probe" ? 132000 : 27000),
+      signal: AbortSignal.timeout(method === "GET" ? 20000 : path === "/api/probe" ? 132000 : 27000),
     });
   } catch {
     throw new Error("network_error");
@@ -154,9 +157,23 @@ function renderState() {
   for (const key of ["ready", "busy", "starting", "problem"]) byId(key).textContent = number(workers?.[key]);
   byId("worker-observed").textContent = workers?.observed_at
     ? t("observed", { time: clock(workers.observed_at) }) : "";
-  byId("rollout-status").textContent = workers
-    ? t("worker_status", { ready: number(workers.current_ready), stale: number(workers.stale_workers) })
-    : t(state?.workers?.error ?? (state ? "unavailable" : "loading"));
+  const workerNotes = [];
+  if (workers?.runtime_active != null || workers?.jobs_in_progress != null) {
+    workerNotes.push(t("queue_runtime", {
+      active: number(workers.runtime_active), jobs: number(workers.jobs_in_progress),
+    }));
+  }
+  if (workers?.inactive_idle > 0) {
+    workerNotes.push(t("inactive_idle", { count: number(workers.inactive_idle) }));
+  }
+  if (workers?.stale_workers > 0) {
+    workerNotes.push(t("stale_inventory", {
+      count: number(workers.stale_workers), ready: number(workers.current_ready),
+    }));
+  }
+  if (workers?.runtime_error) workerNotes.push(t("queue_runtime_unavailable"));
+  byId("rollout-status").textContent = workerNotes.join(" ")
+    || (workers ? "" : t(state?.workers?.error ?? (state ? "unavailable" : "loading")));
   byId("active-stat").textContent = number(current?.active);
   byId("max-stat").textContent = number(current?.max);
   byId("concurrency").textContent = state?.ml_concurrency
@@ -193,13 +210,43 @@ async function refreshState() {
 }
 
 function renderProbe() {
-  byId("probe").disabled = !state?.probe_enabled || !state?.endpoint?.data || probeResult?.status === "probe_running";
+  const seconds = state?.probe_timeout_seconds;
+  const duration = seconds % 60 === 0
+    ? t("probe_minutes", { time: number(seconds / 60) })
+    : t("probe_seconds", { time: number(seconds) });
+  byId("probe-budget").textContent = state?.probe_enabled ? t("probe_budget", { duration }) : "";
+  const status = probeResult?.status;
+  const pending = probePending.has(status);
+  byId("probe").disabled = !state?.probe_enabled || !state?.endpoint?.data
+    || status === "probe_running" || pending;
   const output = byId("probe-result");
   const result = probeResult ?? (state && !state.probe_enabled ? { status: "probe_disabled" } : null);
   output.hidden = !result;
-  output.textContent = result
-    ? [t(result.status), result.elapsed_ms == null ? "" : t("elapsed", { time: number(result.elapsed_ms) })].join(" ").trim()
-    : "";
+  if (!result) {
+    output.textContent = "";
+    return;
+  }
+  const waiting = pending || status?.includes("timeout") || status?.includes("_expired");
+  const elapsed = result.elapsed_ms == null ? "" : waiting
+    ? t("probe_waited", { time: number(Math.round(result.elapsed_ms / 1000)) })
+    : t("elapsed", { time: number(result.elapsed_ms) });
+  const note = result.status_error ? t("probe_status_delayed") : "";
+  output.textContent = [t(result.status), elapsed, note].filter(Boolean).join(" ");
+}
+
+async function refreshProbe() {
+  if (probePolling || probeResult?.status === "probe_running") return;
+  probePolling = true;
+  const version = probeVersion;
+  try {
+    const current = await request("/api/probe");
+    if (current && version === probeVersion) probeResult = current;
+  } catch {
+    if (probePending.has(probeResult?.status)) probeResult.status_error = "network_error";
+  } finally {
+    probePolling = false;
+    renderProbe();
+  }
 }
 
 function renderEstimate(container, estimate) {
@@ -498,6 +545,7 @@ byId("review").addEventListener("click", async () => {
   }
 });
 byId("probe").addEventListener("click", async () => {
+  probeVersion += 1;
   probeResult = { status: "probe_running" };
   renderProbe();
   try {
@@ -528,9 +576,13 @@ setInterval(() => {
   void refreshState();
 }, 15000);
 setInterval(() => {
+  if (probePending.has(probeResult?.status)) void refreshProbe();
+}, 2500);
+setInterval(() => {
   if (!document.hidden && page === "overview") void refreshPage();
 }, 60000);
 
 applyLanguage();
 showPage();
 void refreshState();
+void refreshProbe();

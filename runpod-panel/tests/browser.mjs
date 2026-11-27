@@ -23,10 +23,14 @@ try {
   await expect(page.getByRole("heading", { name: "Обзор" })).toBeVisible();
   await expect(page.locator("#ready")).toHaveText("1");
   await expect(page.locator("#problem")).toHaveText("2");
+  await expect(page.locator("#rollout-status")).toContainText("готовых и запущенных воркеров — 3, запросов в обработке — 2");
+  await expect(page.locator("#probe-budget")).toContainText("16 мин");
+  await expect(page.locator("#overview").getByText(/Grafana считает токены запросов этого чата/)).toBeVisible();
   await expect(page.locator("#charts canvas")).toHaveCount(4);
   await expect(page.getByText(/Свежих точек нет/).first()).toBeVisible();
   await expect(page.getByText(/не вернул значения/)).toBeVisible();
   await page.getByRole("button", { name: "Проверить ответ" }).click();
+  await expect(page.locator("#probe-result")).toContainText("Ждём воркер");
   await expect(page.locator("#probe-result")).toContainText(/OK.*мс/);
   if (screenshots) await page.screenshot({ path: path.join(screenshots, "overview.png"), fullPage: true });
 

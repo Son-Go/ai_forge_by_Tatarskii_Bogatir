@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
@@ -11,6 +13,23 @@ from .config import Config
 MANAGEMENT_URL = "https://api.runpod.io/v2"
 INFERENCE_URL = "https://api.runpod.ai/v2"
 METRICS_WINDOW = timedelta(hours=24)
+
+
+PROBE_PENDING = {"probe_queued", "probe_processing"}
+
+
+@dataclass
+class ProbeJob:
+    id: str
+    started: float
+    status: str
+    finished: float | None = None
+
+    def result(self) -> dict:
+        if self.status not in PROBE_PENDING and self.finished is None:
+            self.finished = monotonic()
+        elapsed = (self.finished if self.finished is not None else monotonic()) - self.started
+        return {"status": self.status, "elapsed_ms": round(elapsed * 1000)}
 
 
 class ProviderError(Exception):
@@ -54,6 +73,8 @@ class Runpod:
         self.config = config
         self.client = client
         self.endpoint_url = f"{MANAGEMENT_URL}/serverless/{config.endpoint_id}"
+        self._probe_lock = asyncio.Lock()
+        self._probe_job: ProbeJob | None = None
 
     async def _request(
         self, method, url, *, key=None, seconds=8, expect_body=True, money=False, **kwargs
@@ -113,12 +134,11 @@ class Runpod:
     async def workers(self) -> dict:
         data = await self._request("GET", self.endpoint_url + "/workers")
         summary = mapping(data.get("summary"))
-        idle, running, initializing, throttled, unhealthy = (
-            count(summary.get(k))
-            for k in ("idle", "running", "initializing", "throttled", "unhealthy")
+        running, initializing, throttled, unhealthy = (
+            count(summary.get(k)) for k in ("running", "initializing", "throttled", "unhealthy")
         )
         rows = data.get("workers")
-        stale = current_ready = None
+        ready = stale = current_ready = inactive_idle = None
         if (
             isinstance(rows, list)
             and len(rows) == count(summary.get("total"))
@@ -129,19 +149,50 @@ class Runpod:
                 for row in rows
             )
         ):
+            # Runpod can list scaled-down records as IDLE with no worker uptime.
+            idle = [row for row in rows if row["status"] == "IDLE"]
+            ready = sum(count(row.get("uptimeSeconds")) is not None for row in idle)
+            inactive_idle = len(idle) - ready
             stale = sum(row["isStale"] for row in rows)
             current_ready = sum(
-                not row["isStale"] and row["status"] in {"IDLE", "RUNNING"} for row in rows
+                not row["isStale"]
+                and (
+                    row["status"] == "RUNNING"
+                    or (row["status"] == "IDLE" and count(row.get("uptimeSeconds")) is not None)
+                )
+                for row in rows
             )
         return {
-            "ready": idle,
+            "ready": ready,
             "busy": running,
             "starting": initializing,
             "problem": None if throttled is None or unhealthy is None else throttled + unhealthy,
             "stale_workers": stale,
             "current_ready": current_ready,
+            "inactive_idle": inactive_idle,
             "observed_at": utc_now().isoformat(),
         }
+
+    async def queue_health(self) -> dict:
+        data = await self._request(
+            "GET",
+            f"{INFERENCE_URL}/{self.config.endpoint_id}/health",
+            key=self.config.inference_key,
+        )
+        workers, jobs = mapping(data.get("workers")), mapping(data.get("jobs"))
+        throttled, unhealthy = count(workers.get("throttled")), count(workers.get("unhealthy"))
+        ready, running = count(workers.get("ready")), count(workers.get("running"))
+        snapshot = {
+            "ready": ready,
+            "starting": count(workers.get("initializing")),
+            "problem": None if throttled is None or unhealthy is None else throttled + unhealthy,
+            "runtime_running": running,
+            "runtime_active": None if ready is None or running is None else ready + running,
+            "jobs_in_progress": count(jobs.get("inProgress")),
+        }
+        if all(value is None for value in snapshot.values()):
+            raise ProviderError("provider_response")
+        return snapshot | {"observed_at": utc_now().isoformat()}
 
     async def metrics(self, kind: str, now: datetime) -> dict:
         fields = (
@@ -262,41 +313,121 @@ class Runpod:
             raise ProviderError("provider_response")
         return {"amount": balance, "mode": data["billingMode"]}
 
+    def probe_budget(self, endpoint_type: str | None) -> int:
+        seconds = self.config.probe_seconds
+        return min(seconds, 120) if endpoint_type == "LOAD_BALANCER" else seconds
+
+    @staticmethod
+    def _probe_answer(output) -> str:
+        if isinstance(output, list) and len(output) == 1:
+            output = output[0]
+        result = mapping(output)
+        if result.get("error"):
+            return "probe_failed"
+        choices = result.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return "probe_no_answer"
+        answer = mapping(mapping(choices[0]).get("message")).get("content")
+        return (
+            "probe_ok" if isinstance(answer, str) and answer.strip() == "OK" else "probe_unexpected"
+        )
+
+    def _queued_status(self, data: dict) -> str:
+        status = data.get("status")
+        if not isinstance(status, str):
+            return "provider_response"
+        if status == "COMPLETED":
+            return self._probe_answer(data.get("output"))
+        return {
+            "IN_QUEUE": "probe_queued",
+            "IN_PROGRESS": "probe_processing",
+            "FAILED": "probe_failed",
+            "CANCELLED": "probe_cancelled",
+            "CANCELED": "probe_cancelled",
+            "TIMED_OUT": "probe_provider_timeout",
+        }.get(status, "provider_response")
+
+    async def probe_status(self) -> dict | None:
+        async with self._probe_lock:
+            job = self._probe_job
+            if job is None:
+                return None
+            if job.status in PROBE_PENDING:
+                if monotonic() - job.started >= self.probe_budget("QUEUE"):
+                    job.status = (
+                        "probe_wait_queue_expired"
+                        if job.status == "probe_queued"
+                        else "probe_wait_running_expired"
+                    )
+                else:
+                    try:
+                        data = await self._request(
+                            "GET",
+                            f"{INFERENCE_URL}/{self.config.endpoint_id}/status/{job.id}",
+                            key=self.config.inference_key,
+                        )
+                        job.status = self._queued_status(data)
+                    except ProviderError as exc:
+                        if exc.uncertain or exc.code == "provider_rate_limited":
+                            return job.result() | {"status_error": exc.code}
+                        job.status = exc.code
+            return job.result()
+
     async def probe(self, endpoint_type: str) -> dict:
         if not self.config.inference_key:
             return {"status": "probe_disabled"}
         endpoint = self.config.endpoint_id
-        url = (
-            f"{INFERENCE_URL}/{endpoint}/openai/v1/chat/completions"
-            if endpoint_type == "QUEUE"
-            else f"https://{endpoint}.api.runpod.ai/v1/chat/completions"
-        )
+        payload = {
+            "model": self.config.model,
+            "messages": [{"role": "user", "content": "Reply with exactly OK. /no_think"}],
+            "max_tokens": 16,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "temperature": 0,
+            "stream": False,
+        }
         started = monotonic()
-        try:
-            data = await self._request(
-                "POST",
-                url,
-                key=self.config.inference_key,
-                seconds=self.config.probe_seconds,
-                json={
-                    "model": self.config.model,
-                    "messages": [{"role": "user", "content": "Reply with exactly OK. /no_think"}],
-                    "max_tokens": 16,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                    "temperature": 0,
-                    "stream": False,
-                },
-            )
-            choices = data.get("choices")
-            if not isinstance(choices, list) or not choices:
-                raise ProviderError("probe_no_answer")
-            answer = mapping(mapping(choices[0]).get("message")).get("content")
-            # Report the outcome, never arbitrary provider output or sensitive debug text.
-            status = (
-                "probe_ok"
-                if isinstance(answer, str) and answer.strip() == "OK"
-                else "probe_unexpected"
-            )
-        except ProviderError as exc:
-            status = exc.code
-        return {"status": status, "elapsed_ms": round((monotonic() - started) * 1000)}
+        async with self._probe_lock:
+            if (
+                self._probe_job
+                and self._probe_job.status in PROBE_PENDING
+                and started - self._probe_job.started < self.probe_budget("QUEUE")
+            ):
+                return self._probe_job.result()
+            self._probe_job = None
+            try:
+                if endpoint_type == "QUEUE":
+                    data = await self._request(
+                        "POST",
+                        f"{INFERENCE_URL}/{endpoint}/run",
+                        key=self.config.inference_key,
+                        json={
+                            "input": {
+                                "openai_route": "/v1/chat/completions",
+                                "openai_input": payload,
+                            },
+                            "policy": {"ttl": max(10, self.probe_budget("QUEUE")) * 1000},
+                        },
+                    )
+                    job_id = data.get("id")
+                    if not isinstance(job_id, str) or not re.fullmatch(
+                        r"[A-Za-z0-9_-]{1,128}", job_id
+                    ):
+                        raise ProviderError("probe_submission_unknown")
+                    self._probe_job = ProbeJob(job_id, started, self._queued_status(data))
+                    return self._probe_job.result()
+                data = await self._request(
+                    "POST",
+                    f"https://{endpoint}.api.runpod.ai/v1/chat/completions",
+                    key=self.config.inference_key,
+                    seconds=self.probe_budget(endpoint_type),
+                    json=payload,
+                )
+                status = self._probe_answer(data)
+            except ProviderError as exc:
+                if endpoint_type == "QUEUE" and exc.uncertain:
+                    status = "probe_submission_unknown"
+                elif exc.code == "provider_timeout":
+                    status = "probe_timeout"
+                else:
+                    status = exc.code
+            return {"status": status, "elapsed_ms": round((monotonic() - started) * 1000)}
