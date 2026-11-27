@@ -36,6 +36,9 @@ class ReplyPlanner {
     private static final Pattern PRODUCT_REFERENCE = Pattern.compile(
             "(?iuU)\\b(?:он|она|оно|они|его|не[её]|этот|эта|это|этого|ранее выбранн[а-я]*)\\b");
     private static final Pattern OS = Pattern.compile("(?U)\\b(astra linux|linux|windows|macos|mac os(?: x)?|android|ios)\\b");
+    private static final Pattern LICENSE_VERSION = Pattern.compile(
+            "(?:лицензия(?: с подпиской на обновления)?|продление(?: expired| просроченной)?"
+            + "(?: лицензии| подписки на обновления)?) на [0-9]+ (?:год(?:а)?|лет|месяц(?:а|ев)?|мес)\\.?");
     private static final Pattern SUPPORT_PROCEDURE = Pattern.compile(
             "(?U)\\b(?:как (?:вернуть|оформить|сделать|доставля[а-я]+|активировать)|"
             + "можно ли (?:вернуть|оформить)|какие (?:условия|правила))\\b");
@@ -218,28 +221,38 @@ class ReplyPlanner {
                     + "». Если знаете точную редакцию или артикул, напишите их.");
         }
 
+        String os = facet == Facet.PLATFORM ? platformIn(text) : null;
+        if (os != null) {
+            List<Offer> compatible = offers.stream()
+                    .filter(offer -> compare(offer, "platform", os) == Match.CONFIRMED)
+                    .limit(3).toList();
+            if (!compatible.isEmpty()) {
+                return offerReply("answer", "В каталоге для «" + product
+                        + "» подтверждена совместимость с " + os + ".", compatible);
+            }
+        }
+
         List<Map.Entry<Offer, String>> confirmed = offers.stream()
                 .filter(offer -> facet.value(offer) != null)
                 .map(offer -> Map.entry(offer, facet.value(offer))).toList();
         List<String> values = confirmed.stream().map(Map.Entry::getValue).distinct().limit(2).toList();
         boolean singleValue = values.size() == 1 && confirmed.size() == offers.size();
-        if (singleValue) {
+        if (singleValue && os == null) {
             String summary = "По каталогу для «" + product + "» " + facet.label + " — " + values.getFirst() + ".";
             return offerReply("answer", summary,
                     confirmed.stream().limit(3).map(Map.Entry::getKey).toList());
         }
 
-        String subject = facet == Facet.PLATFORM ? first(platformIn(text), facet.search) : facet.search;
+        String subject = first(os, facet.search);
         if (facet != Facet.PRICE) {
             List<Knowledge> articles = catalog.productKnowledge(product, subject);
             if (!articles.isEmpty()) return knowledgeReply(articles.subList(0, 1));
         }
-        if (!values.isEmpty()) {
+        if (os == null && !values.isEmpty()) {
             return offerReply("insufficient_data", "Для «" + product + "» данные по полю «" + facet.label
                     + "» зависят от позиции или заполнены частично. Уточните редакцию или артикул.",
                     confirmed.stream().limit(3).map(Map.Entry::getKey).toList());
         }
-        String os = facet == Facet.PLATFORM ? platformIn(text) : null;
         String field = os == null ? facet.missing : "совместимость с " + os;
         return offerReply("insufficient_data", "Для «" + product + "» в текущем каталоге и справке не удалось подтвердить "
                 + field + ". Если знаете редакцию или артикул, укажите их для проверки.",
@@ -406,7 +419,10 @@ class ReplyPlanner {
     }
 
     private static Match editionMatch(Offer offer, String edition) {
-        if (offer.edition() == null) return CatalogSearch.mentions(offer.name(), edition) ? Match.CONFIRMED : Match.UNKNOWN;
+        // The feed also uses «Версия» for license terms, which cannot establish a product edition.
+        if (offer.edition() == null || LICENSE_VERSION.matcher(normalize(offer.edition())).matches()) {
+            return CatalogSearch.mentions(offer.name(), edition) ? Match.CONFIRMED : Match.UNKNOWN;
+        }
         return CatalogSearch.mentions(offer.edition(), edition) ? Match.CONFIRMED : Match.CONFLICT;
     }
 
@@ -434,9 +450,10 @@ class ReplyPlanner {
     }
 
     private static String platformIn(String text) {
-        var os = OS.matcher(text);
-        if (!os.find()) return null;
-        return switch (platform(os.group())) {
+        List<String> platforms = OS.matcher(text).results()
+                .map(match -> platform(match.group())).distinct().limit(2).toList();
+        if (platforms.size() != 1) return null;
+        return switch (platforms.getFirst()) {
             case "linux" -> "Linux";
             case "windows" -> "Windows";
             case "macos" -> "macOS";

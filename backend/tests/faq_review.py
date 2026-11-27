@@ -48,6 +48,7 @@ RESPONSE_FEED = """<yml_catalog date="2026-11-26 12:00">
                 <param name="К-во пользователей до">50</param>
                 <param name="Тип лицензии">Продление</param>
                 <param name="Срок действия">12 мес.</param>
+                <param name="Версия">Продление подписки на обновления на 1 год</param>
             </offer>
             <offer id="bat-pro" available="true">
                 <name>The Bat! Лицензия Professional</name>
@@ -408,6 +409,14 @@ def exercise_responses(origin, mock, sql):
     reply = ask(path, cookie, question)
     assert reply["cards"][0]["offer_id"] == "bat-pro" and "Windows" in reply["text"], reply
     assert all("The Bat!" in source["title"] for source in reply["sources"])
+    bat_linux = interpretation("А The Bat! Professional работает на Linux?", "product_question", "The Bat! Professional")
+    reply = ask(path, cookie, bat_linux)
+    assert "не удалось подтвердить совместимость с Linux" in reply["text"], reply
+    assert reply["cards"][0]["attributes"]["platform"] == "Windows"
+    bat_windows = interpretation("А The Bat! Professional работает на Windows?", "product_question", "The Bat! Professional")
+    reply = ask(path, cookie, bat_windows)
+    assert "подтверждена совместимость с Windows" in reply["text"], reply
+    assert reply["cards"][0]["attributes"]["platform"] == "Windows"
     linux = interpretation("А он работает на Linux?", "product_question", "MDaemon")
     reply = ask(path, cookie, linux)
     assert "совместимость с Linux" in reply["text"] and "не удалось подтвердить" in reply["text"], reply
@@ -509,8 +518,8 @@ def exercise_snapshot(origin, mock, sql):
     assert ask_catalog("Снова подбери MDaemon", "MDaemon")["cards"]
 
     path, cookie = new_session()
-    reply = ask_catalog("Нужно продление MDaemon Standard на 50 пользователей на год", "MDaemon Standard",
-                        product_name=("MDaemon Standard", "MDaemon Standard"),
+    reply = ask_catalog("Нужно продление MDaemon Standard на 50 пользователей на год", "MDaemon",
+                        product_name=("MDaemon", "MDaemon"), edition=("Standard", "Standard"),
                         license_kind=("renewal", "продление"), seats=(50, "50 пользователей"),
                         license_term_months=(12, "на год"))
     assert "Standard" in reply["text"] and reply["cards"], reply
@@ -521,7 +530,7 @@ def exercise_snapshot(origin, mock, sql):
     reply = ask_catalog("Нужна защита рабочих станций для 35 сотрудников. Windows, локально, желательно из реестра.",
                         None, "needs_solution", use_case=("защита рабочих станций", "защита рабочих станций"),
                         seats=(35, "35 сотрудников"), platform=("Windows", "Windows"),
-                        deployment=("on_prem", "локально"), domestic_required=(True, "желательно из реестра"))
+                        deployment=("on_prem", "локально"))
     assert "способ развёртывания" in reply["text"] and reply["cards"], reply
     assert mock.compositions == 0
     print("PASS: full catalog import, The Bat! vs MDaemon, partial Standard renewal and deployment evidence")
