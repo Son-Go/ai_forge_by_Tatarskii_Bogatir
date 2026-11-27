@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from .config import Settings
 from .errors import InvalidModelOutput, ServiceError, validate_model_json
 from .schemas import Interpretation
+from .telemetry import RunpodCall, Stage
 
 logger = logging.getLogger("uvicorn.error").getChild("runpod")
 
@@ -64,6 +65,14 @@ class RunpodClient:
         self.model_version = model_version
         self.slots = asyncio.Semaphore(settings.runpod_max_concurrency)
 
+    @contextmanager
+    def call(self, stage: Stage, request_id: str) -> Iterator[RunpodCall]:
+        call = RunpodCall(request_id, stage, self.model_version)
+        try:
+            yield call
+        finally:
+            call.record()
+
     def payload(self, system_prompt: str, user_payload: str, *, stream: bool) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.settings.runpod_model,
@@ -76,7 +85,9 @@ class RunpodClient:
             "chat_template_kwargs": {"enable_thinking": False},
             "max_tokens": 1_024 if stream else 768,
         }
-        if not stream and self.settings.runpod_response_format == "json_schema":
+        if stream:
+            body["stream_options"] = {"include_usage": True}
+        elif self.settings.runpod_response_format == "json_schema":
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -87,16 +98,20 @@ class RunpodClient:
         return body
 
     async def interpret(
-        self, system_prompt: str, user_payload: str, request_id: str, deadline: float
+        self, system_prompt: str, user_payload: str, call: RunpodCall, deadline: float
     ) -> Interpretation:
+        request_id = call.request_id
+        payload = self.payload(system_prompt, user_payload, stream=False)
         started = perf_counter()
         with translate_runpod_errors(request_id):
             async with asyncio.timeout_at(deadline), self.slots:
+                call.started = True
                 response = await self.http.post(
                     "chat/completions",
-                    json=self.payload(system_prompt, user_payload, stream=False),
+                    json=payload,
                     headers={"X-Request-Id": request_id},
                 )
+                call.read_usage(response.content)
                 response.raise_for_status()
                 completion = validate_model_json(Completion, response.content, "completion_schema")
                 if len(completion.choices) != 1:
@@ -118,20 +133,24 @@ class RunpodClient:
         return result
 
     async def stream(
-        self, system_prompt: str, user_payload: str, request_id: str, deadline: float
+        self, system_prompt: str, user_payload: str, call: RunpodCall, deadline: float
     ) -> AsyncGenerator[str, None]:
+        request_id = call.request_id
+        payload = self.payload(system_prompt, user_payload, stream=True)
         started = perf_counter()
         resources = AsyncExitStack()
+        validation_error = None
         try:
             with translate_runpod_errors(request_id):
                 async with asyncio.timeout_at(deadline):
                     await resources.enter_async_context(self.slots)
+                    call.started = True
                     source = await resources.enter_async_context(
                         aconnect_sse(
                             self.http,
                             "POST",
                             "chat/completions",
-                            json=self.payload(system_prompt, user_payload, stream=True),
+                            json=payload,
                             headers={"X-Request-Id": request_id},
                         )
                     )
@@ -143,27 +162,39 @@ class RunpodClient:
                         event = await anext(events, None)
                     if event is None:
                         raise InvalidModelOutput("stream_ended_before_done")
+                    if event.data and event.data != "[DONE]":
+                        call.read_usage(event.data)
                     if event.event == "error":
                         raise InvalidModelOutput("provider_stream_error")
                     if event.data == "[DONE]":
-                        return
-                    if not event.data:
+                        break
+                    if not event.data or validation_error is not None:
                         continue
-                    chunk = validate_model_json(Chunk, event.data, "stream_chunk_schema")
-                    for choice in chunk.choices:
-                        if choice.finish_reason not in (None, "stop"):
-                            raise InvalidModelOutput("incomplete_stream")
-                        if choice.delta.content:
-                            if first_token:
-                                logger.info(
-                                    "Runpod compose request_id=%s provider_id=%r "
-                                    "first_token_ms=%.0f",
-                                    request_id,
-                                    source.response.headers.get("x-request-id", "")[:128],
-                                    (perf_counter() - started) * 1_000,
-                                )
-                                first_token = False
-                            yield choice.delta.content
+                    try:
+                        chunk = validate_model_json(Chunk, event.data, "stream_chunk_schema")
+                        for choice in chunk.choices:
+                            if choice.finish_reason not in (None, "stop"):
+                                raise InvalidModelOutput("incomplete_stream")
+                            if choice.delta.content:
+                                if first_token:
+                                    logger.info(
+                                        "Runpod compose request_id=%s provider_id=%r "
+                                        "first_token_ms=%.0f",
+                                        request_id,
+                                        source.response.headers.get("x-request-id", "")[:128],
+                                        (perf_counter() - started) * 1_000,
+                                    )
+                                    first_token = False
+                                yield choice.delta.content
+                    except InvalidModelOutput as error:
+                        # Keep reading until the final usage or the original deadline.
+                        validation_error = error
+        except ServiceError:
+            if validation_error is not None:
+                raise validation_error from None
+            raise
         finally:
             with CancelScope(shield=True):
                 await resources.aclose()
+        if validation_error is not None:
+            raise validation_error

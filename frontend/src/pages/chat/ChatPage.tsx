@@ -11,26 +11,43 @@ import { Icon } from '../../shared/ui/Icon'
 import { DemoBanner, WorkspaceHeader } from '../../shared/ui/WorkspaceHeader'
 import { AutomaticHandoffNotice, type AutomaticHandoffNoticeData } from '../../features/chat/ui/AutomaticHandoffNotice'
 import { useSessionHandoff } from '../../features/handoff/useSessionHandoff'
-import { InvoiceDemo } from '../../features/quote/InvoiceDemo'
 import { QuoteDraftAction } from '../../features/quote/QuoteDraftAction'
+import { formatDate } from '../../shared/lib/presentation'
 
-const suggestions = [
-  { title: 'Знаю продукт', description: 'Найдём нужную версию и уточним условия лицензии.', icon: 'search', text: 'Нужна новая лицензия MDaemon. Помогите выбрать вариант.' },
-  { title: 'Подобрать решение', description: 'Сопоставим вашу задачу с предложениями каталога.', icon: 'layers', text: 'Нужно защитить почту и файлы на 50 сотрудников.' },
-  { title: 'Задать вопрос', description: 'Разберёмся в характеристиках и условиях покупки.', icon: 'book', text: 'Какие документы нужны для покупки лицензии?' },
+const exampleQuestions = [
+  'Какая лицензия MDaemon подойдёт для 50 пользователей?',
+  'Как защитить почту и файлы 50 сотрудников?',
+  'Какие документы нужны для покупки лицензии?',
 ] as const
 const stages = { interpreting: 'Анализируем запрос', searching: 'Ищем в каталоге и базе знаний', generating: 'Готовим ответ' }
+const composerExamples = [
+  'Есть MDaemon?', 'Как оформить КП?', 'Можно продлить ПО?', 'Как оплатить заказ?',
+  'Есть ПО для Linux?', 'Как защитить почту?', 'Есть аналоги Visio?', 'Есть скидки на ПО?',
+]
+const exampleKey = 'softline:last-question-example'
+
+function pickExample(previous?: string | null) {
+  const choices = composerExamples.filter((example) => example !== previous)
+  return choices[Math.floor(Math.random() * choices.length)]!
+}
 
 export function ChatView({ state, controller, mock = false, embedded = false, automaticHandoff, handoffIssue }: { state: ChatState; controller: ChatController; mock?: boolean; embedded?: boolean; automaticHandoff?: AutomaticHandoffNoticeData; handoffIssue?: string }) {
-  const [suggestion, setSuggestion] = useState('')
+  const [placeholder, setPlaceholder] = useState(() => {
+    try { return pickExample(sessionStorage.getItem(exampleKey)) } catch { return pickExample() }
+  })
   const [following, setFollowing] = useState(true)
   const [atEnd, setAtEnd] = useState(true)
   const viewport = useRef<HTMLDivElement>(null)
   const end = useRef<HTMLDivElement>(null)
   const busy = state.phase !== 'ready' || state.issue?.action === 'resend'
+  const canSwitch = state.phase === 'ready' || state.phase === 'unavailable'
   const messages: Message[] = [...state.session?.messages || []]
   if (state.optimistic && !messages.some((m) => m.id === state.optimistic?.id)) messages.push(state.optimistic)
+  const hasMessages = messages.length > 0
   const signature = `${messages.length}:${state.streamText.length}:${state.phase}:${automaticHandoff?.title || ''}:${automaticHandoff?.message || ''}`
+  useEffect(() => {
+    try { sessionStorage.setItem(exampleKey, placeholder) } catch { /* Storage may be disabled. */ }
+  }, [placeholder])
   useEffect(() => {
     if (following && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight
   }, [signature, following])
@@ -46,7 +63,17 @@ export function ChatView({ state, controller, mock = false, embedded = false, au
     observer.observe(target)
     return () => observer.disconnect()
   }, [])
-  function fill(text: string) { setSuggestion(text); document.getElementById('message')?.focus() }
+  function startNewDialog() {
+    setPlaceholder(pickExample(placeholder))
+    setFollowing(true)
+    void controller.newSession()
+  }
+  function goHome() {
+    setPlaceholder(pickExample(placeholder))
+    setFollowing(true)
+    controller.goHome()
+    viewport.current?.closest('main')?.focus({ preventScroll: true })
+  }
   const selected = state.session?.selected_offer
   const selectedInHistory = selected && messages.some((message) => message.cards.some((offer) =>
     selected.offer_id === offer.offer_id && selected.catalog_version === offer.catalog_version))
@@ -73,8 +100,15 @@ export function ChatView({ state, controller, mock = false, embedded = false, au
   if (state.phase === 'selecting') status = 'Подтверждаем выбранное предложение…'
   return <div className={embedded ? 'chat-section' : 'app-shell'}>
     {!embedded && <><WorkspaceHeader />{mock && <DemoBanner />}</>}
-    <main className={`main${messages.length ? ' has-messages' : ''}`} id="consultant-workspace" tabIndex={-1}>
-      <div className="workspace-bar"><div className="workspace-title"><span className="workspace-icon"><Icon name="assistant" /></span><h1>Консультант Softline</h1></div><div className="workspace-actions"><button className="new-dialog" type="button" disabled={!['ready', 'unavailable'].includes(state.phase)} onClick={() => { setSuggestion(''); void controller.newSession() }}><Icon name="plus" />Новый диалог</button></div></div>
+    <main className={`main${hasMessages ? ' has-messages' : ''}`} id="consultant-workspace" tabIndex={-1}>
+      <div className="workspace-bar">
+        <div className="workspace-title">
+          {hasMessages ? <button className="chat-back" type="button" aria-label="На главную" title="На главную" disabled={!canSwitch} onClick={goHome}><Icon name="back" /></button>
+            : <span className="workspace-icon"><Icon name="assistant" /></span>}
+          <h1>Консультант Softline</h1>
+        </div>
+        <div className="workspace-actions"><button className="new-dialog" type="button" aria-label="Новый диалог" title="Новый диалог" disabled={!canSwitch} onClick={startNewDialog}><Icon name="plus" /><span>Новый диалог</span></button></div>
+      </div>
       <div className="conversation" ref={viewport} onScroll={() => {
         const el = viewport.current
         if (el) {
@@ -84,15 +118,12 @@ export function ChatView({ state, controller, mock = false, embedded = false, au
         }
       }} aria-label="Переписка">
         {!messages.length && state.phase === 'ready' && <section className="welcome">
-          <div className="welcome-intro"><div className="welcome-copy"><span className="eyebrow"><span />От задачи — к выбору</span>
-          <h2>Поможем найти<br /><span>подходящее решение</span></h2><p>Программное обеспечение для ваших задач. Уточним требования, подберём варианты и ответим на вопросы с опорой на источники.</p></div>
-          <aside className="welcome-guide" aria-label="Как помогает консультант"><span className="guide-heading">Продуманный выбор</span>
-            <div><Icon name="search" /><p><strong>Уточняем главное</strong><span>Задача, инфраструктура и условия лицензии</span></p></div>
-            <div><Icon name="layers" /><p><strong>Сопоставляем варианты</strong><span>Предложения из каталога Softline</span></p></div>
-            <div><Icon name="book" /><p><strong>Показываем основания</strong><span>Характеристики и ссылки на источники</span></p></div>
-          </aside></div>
-          <div className="scenario-heading"><h3>С чего начнём?</h3><span>Выберите сценарий или напишите свой вопрос</span></div>
-          <div className="suggestions">{suggestions.map((item, index) => <button className="scenario-card" type="button" key={item.title} aria-label={item.title} aria-describedby={`scenario-${index}`} onClick={() => fill(item.text)}><span className="scenario-top"><span className="scenario-icon"><Icon name={item.icon} /></span><span className="scenario-number">0{index + 1}</span></span><strong>{item.title}</strong><span className="scenario-description" id={`scenario-${index}`}>{item.description}</span><span className="scenario-action">Начать консультацию<Icon name="arrow" /></span></button>)}</div>
+          <h2>Поможем найти <span>подходящее решение</span></h2>
+          <p>Подберём ПО из каталога Softline и уточним условия лицензии.</p>
+          <h3 id="example-questions-heading">Примеры вопросов</h3>
+          <ul className="example-questions" aria-labelledby="example-questions-heading">
+            {exampleQuestions.map((question) => <li key={question}>{question}</li>)}
+          </ul>
         </section>}
         {messages.map(messageNode)}
         {state.streamText && <article className="message message-assistant" aria-label="Ответ формируется"><span className="message-avatar" aria-hidden="true"><Icon name="assistant" /></span><div className="message-content"><div className="message-author">Консультант Softline<span className="ai-tag">AI</span></div><div className="message-body">{state.streamText}</div></div></article>}
@@ -100,16 +131,15 @@ export function ChatView({ state, controller, mock = false, embedded = false, au
         {state.issue && <section className="notice" role="alert"><Icon name="warning" /><div className="notice-content"><p>{state.issue.message}</p>
           {state.issue.requestId && <small>Код запроса: {state.issue.requestId}</small>}
           {state.issue.action === 'restore' && <button type="button" onClick={() => void controller.recover()}>Проверить состояние</button>}
-          {state.issue.action === 'new-session' && <button type="button" onClick={() => void controller.newSession()}>Начать новый диалог</button>}
+          {state.issue.action === 'new-session' && <button type="button" onClick={startNewDialog}>Начать новый диалог</button>}
           {['retry', 'resend'].includes(state.issue.action || '') && <button type="button" disabled={state.phase !== 'ready'} onClick={() => void controller.repeat()}>Повторить отправку</button>}
           </div>
         </section>}
         {state.updatedOffer && <section className="updated-offer"><h2>Обновлённое предложение</h2><OfferCard offer={state.updatedOffer} selected={false} disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
         {selected && !selectedInHistory && <section className="updated-offer"><h2>Выбранное предложение</h2><OfferCard offer={selected} selected disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
         {state.session && messages.length > 0 && state.session.quotes_enabled && selected && !busy && <div className="conversation-actions">
-          <QuoteDraftAction key={`${state.session.session_id}:${selected.offer_id}:${selected.catalog_version}:${state.session.last_turn?.turn_id}`} sessionId={state.session.session_id} demo={mock} onRefresh={() => void controller.recover()} />
+          <QuoteDraftAction key={`${state.session.session_id}:${selected.offer_id}:${selected.catalog_version}:${state.session.last_turn?.turn_id}`} sessionId={state.session.session_id} demo={mock} onRefresh={() => void controller.recover()} onOfferChanged={controller.showUpdatedOffer} />
         </div>}
-        {mock && selected && !busy && <div className="conversation-actions"><InvoiceDemo /></div>}
         <AutomaticHandoffNotice notice={automaticHandoff} />
         {handoffIssue && <p className="handoff-sync-issue muted" role="status">{handoffIssue}</p>}
         <div className="conversation-end" ref={end} aria-hidden="true" />
@@ -119,10 +149,23 @@ export function ChatView({ state, controller, mock = false, embedded = false, au
         setFollowing(true)
       }}><Icon name="down" /></button></div>}
       <div className="composer-dock">
-      <MessageComposer disabled={!!busy} suggestion={suggestion} onEdited={() => setSuggestion('')} onSend={async (text) => { setFollowing(true); await controller.send(text); return controller.getSnapshot().rejectedText }} />
+      <MessageComposer key={state.composerKey} disabled={!!busy} placeholder={placeholder} onSend={async (text) => { setFollowing(true); await controller.send(text); return controller.getSnapshot().rejectedText }} />
       <p className="footnote"><Icon name="shield" />Параметры, стоимость и наличие требуют проверки по источникам.</p>
       </div>
     </main>
+    {!hasMessages && (state.recentDialogs.length > 0 || state.recentIssue) && <section className="recent-dialogs" aria-labelledby="recent-dialogs-heading">
+      <h2 className="recent-dialog-heading" id="recent-dialogs-heading"><Icon name="clock" />Недавние диалоги</h2>
+      {state.recentIssue && <p className="recent-dialog-issue" role="alert">{state.recentIssue}</p>}
+      {state.recentDialogs.length > 0 && <ul className="recent-dialog-list" role="list">
+        {state.recentDialogs.map((dialog) => {
+          const active = state.session?.session_id === dialog.id
+          return <li key={dialog.id}><button className="recent-dialog" type="button" aria-current={active || undefined} disabled={!canSwitch || active} onClick={() => {
+            setFollowing(true)
+            void controller.openSession(dialog.id)
+          }}><span>{dialog.title}</span><time dateTime={dialog.updatedAt}>{formatDate(dialog.updatedAt)}</time></button></li>
+        })}
+      </ul>}
+    </section>}
   </div>
 }
 

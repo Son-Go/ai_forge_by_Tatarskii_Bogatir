@@ -36,10 +36,12 @@ test('manager claims, reads, retries a reply with the same ID, resolves and reta
     if (url.pathname.endsWith(`/${caseId}`)) {
       await route.fulfill(assigned ? { json: { handoff: record, messages } } : { status: 404, json: error }); return
     }
-    expect(url.searchParams.get('limit')).toBe('50')
+    expect(url.searchParams.get('limit')).toBe('51')
     await route.fulfill({ json: [record] })
   })
   await login(page)
+  await expect(page.locator('.case-item')).toHaveCount(1)
+  await expect(page.getByRole('navigation', { name: 'Страницы очереди' })).toHaveCount(0)
   await page.getByRole('link', { name: new RegExp(caseId) }).click()
   await page.getByRole('button', { name: 'Взять в работу' }).click()
   await expect(page.getByRole('list', { name: 'Хронология обращения' })).toBeVisible()
@@ -70,20 +72,33 @@ test('manager claims, reads, retries a reply with the same ID, resolves and reta
 test('queue paginates loaded pages, polls, handles 401 and rejects malformed responses', async ({ page }) => {
   const offsets: string[] = []
   let mode: 'ok' | 'bad' | 'unauthorized' = 'ok'
+  let count = 50
   await page.route('**/api/v1/manager/handoffs**', async (route) => {
     const url = new URL(route.request().url())
     offsets.push(url.searchParams.get('offset')!)
     if (mode === 'unauthorized') { await route.fulfill({ status: 401, json: error }); return }
     if (mode === 'bad') { await route.fulfill({ json: [{ ...item, status: 'invented' }] }); return }
-    await route.fulfill({ json: url.searchParams.get('offset') === '0' ? Array.from({ length: 50 }, (_, i) => ({ ...item, handoff_id: `22222222-2222-4222-8222-${String(i).padStart(12, '0')}` })) : [{ ...item, status: 'resolved' }] })
+    await route.fulfill({ json: url.searchParams.get('offset') === '0' ? Array.from({ length: count }, (_, i) => ({ ...item, handoff_id: `22222222-2222-4222-8222-${String(i).padStart(12, '0')}` })) : [{ ...item, status: 'resolved' }] })
   })
   await login(page)
   await expect(page.locator('.case-item')).toHaveCount(50)
+  const previous = page.getByRole('button', { name: 'Назад', exact: true })
+  const next = page.getByRole('button', { name: 'Далее', exact: true })
+  await expect(previous).toHaveCount(0)
+  await expect(next).toHaveCount(0)
+  count = 51
+  await page.getByRole('button', { name: 'Обновить', exact: true }).click()
+  await expect(next).toBeVisible()
+  await expect(page.locator('.case-item')).toHaveCount(50)
   await page.getByRole('combobox', { name: 'Статус обращения' }).selectOption('resolved')
   await expect(page.locator('.case-item')).toHaveCount(0)
-  await page.getByRole('button', { name: 'Далее', exact: true }).click()
+  await next.click()
   await expect(page.locator('.case-item')).toHaveCount(1)
   expect(offsets).toContain('50')
+  await expect(next).toHaveCount(0)
+  await previous.click()
+  await expect(next).toBeVisible()
+  await expect(previous).toHaveCount(0)
   const before = offsets.length
   await expect.poll(() => offsets.length, { timeout: 8000 }).toBeGreaterThan(before)
   mode = 'bad'
@@ -141,35 +156,71 @@ test('client reads Java handoff, receives manager replies, keeps drafting, resol
   expect(sends).toHaveLength(2)
 })
 
-test('quote sends schema fields, downloads PDF, and keeps the form after an error', async ({ page }) => {
+test('quote sends schema fields, keeps the form after errors and approves the downloaded version before invoice', async ({ page }) => {
   const offer = { offer_id: 'test-offer', catalog_version: sessionId, name: 'Тестовая лицензия на 50 пользователей', product_url: 'https://example.com/product', price: { amount: '12000', currency: 'RUB' }, availability: 'available', attributes: { seats: 50 }, source_ids: [] }
   let fail = true
   let requests = 0
+  let approval = false
+  let offerChanged = false
+  let quoteId = caseId
+  const invoiceRequests: string[] = []
   await page.route('**/api/v1/sessions**', async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname
     if (path.endsWith('/quote-drafts')) {
       requests++
       expect(request.postDataJSON()).toEqual({ customer_name: 'Синтетический заказчик', quantity: 1 })
       if (fail) { await route.fulfill({ status: 503, json: error }); return }
-      await route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n% SYNTHETIC TEST PDF' }); return
+      await route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n% SYNTHETIC TEST PDF',
+        headers: { 'X-Quote-Id': quoteId, 'X-Invoice-Drafts-Enabled': 'true' } }); return
+    }
+    if (path.endsWith(`/quote-drafts/${quoteId}/approval`)) { approval = true; await route.fulfill({ status: 204 }); return }
+    if (path.endsWith('/invoice-drafts')) {
+      expect(approval).toBe(true)
+      const input = request.postDataJSON()
+      expect(input).toEqual({ quote_id: quoteId })
+      if (offerChanged) {
+        await route.fulfill({ status: 409, json: { ...error, code: 'OFFER_CHANGED',
+          updated_offer: { ...offer, catalog_version: caseId, name: 'Лицензия с обновлённой ценой' } } }); return
+      }
+      invoiceRequests.push(input.quote_id)
+      await route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n% SYNTHETIC INVOICE PDF' }); return
     }
     if (path.endsWith('/handoff')) { await route.fulfill({ json: { handoff: null } }); return }
     if (request.method() === 'POST') { await route.fulfill({ status: 201, json: { session_id: sessionId } }); return }
     await route.fulfill({ json: { session_id: sessionId, last_turn: null, quotes_enabled: true, selected_offer: offer, messages: [{ ...message('Тестовая рекомендация'), cards: [offer] }] } })
   })
   await page.goto('/')
-  await page.getByRole('button', { name: 'Подготовить черновик КП', exact: true }).click()
+  await page.getByRole('button', { name: 'Подготовить КП', exact: true }).click()
   const customer = page.getByRole('textbox', { name: 'Наименование заказчика' })
   await expect(customer).toHaveAttribute('maxlength', '160')
   await customer.fill('Синтетический заказчик')
   await expect(page.getByRole('spinbutton')).toHaveValue('1')
-  await page.getByRole('button', { name: 'Скачать черновик КП', exact: true }).click()
+  await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText(error.message)
   expect(requests).toBe(1)
   await expect(customer).toHaveValue('Синтетический заказчик')
   fail = false
   const download = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Скачать черновик КП', exact: true }).click()
-  expect((await download).suggestedFilename()).toBe('softline-quote-draft.pdf')
-  await expect(page.getByText('Счёт · демонстрация', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
+  expect((await download).suggestedFilename()).toBe('quote.pdf')
+  const invoice = page.getByRole('button', { name: 'Скачать счёт' })
+  await expect(invoice).toHaveCount(0)
+  await page.getByRole('button', { name: 'Одобрить КП' }).click()
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const invoiceDownload = page.waitForEvent('download')
+    await invoice.click()
+    expect((await invoiceDownload).suggestedFilename()).toBe('invoice.pdf')
+  }
+  expect(invoiceRequests).toEqual([caseId, caseId])
+  quoteId = crypto.randomUUID()
+  approval = false
+  const newDownload = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
+  await newDownload
+  await page.getByRole('button', { name: 'Одобрить КП' }).click()
+  offerChanged = true
+  await invoice.click()
+  await expect(page.getByRole('heading', { name: 'Обновлённое предложение' })).toBeVisible()
+  await expect(page.getByText('Лицензия с обновлённой ценой', { exact: true })).toBeVisible()
+  await expect(invoice).toHaveCount(0)
 })

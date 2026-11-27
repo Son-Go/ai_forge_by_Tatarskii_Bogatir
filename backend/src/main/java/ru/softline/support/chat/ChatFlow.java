@@ -3,6 +3,8 @@ package ru.softline.support.chat;
 import static ru.softline.support.chat.ChatTypes.*;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -31,6 +33,7 @@ class ChatFlow {
     private final ChatStore store;
     private final MlClient ml;
     private final ReplyPlanner planner;
+    private final Counter acceptedMessages;
     private final Semaphore capacity;
     private final long warmTimeoutMillis;
     private final long coldTimeoutMillis;
@@ -38,7 +41,7 @@ class ChatFlow {
     private final AtomicLong lastModelResponse = new AtomicLong(Long.MIN_VALUE);
     private final java.util.concurrent.ScheduledExecutorService timers = Executors.newScheduledThreadPool(2);
 
-    ChatFlow(ChatStore store, MlClient ml, ReplyPlanner planner,
+    ChatFlow(ChatStore store, MlClient ml, ReplyPlanner planner, MeterRegistry metrics,
              @Value("${chat.parallel-turns:8}") int parallel,
              @Value("${chat.turn-timeout-ms}") long warmTimeoutMillis,
              @Value("${chat.cold-turn-timeout-ms}") long coldTimeoutMillis,
@@ -50,6 +53,9 @@ class ChatFlow {
         this.store = store;
         this.ml = ml;
         this.planner = planner;
+        this.acceptedMessages = Counter.builder("chat.user.messages.accepted")
+                .description("New user messages committed by the chat")
+                .register(metrics);
         this.capacity = new Semaphore(parallel);
         this.warmTimeoutMillis = warmTimeoutMillis;
         this.coldTimeoutMillis = coldTimeoutMillis;
@@ -70,6 +76,8 @@ class ChatFlow {
             throw ex;
         }
         Turn turn = accepted.turn();
+        // reserve has committed. Retries referencing a failed turn reuse its user message.
+        if (!accepted.replay() && turn.retryOfTurnId() == null) acceptedMessages.increment();
         SseEmitter emitter = new SseEmitter(timeoutMillis + 8_000);
         AtomicBoolean finished = new AtomicBoolean();
         AtomicBoolean disconnected = new AtomicBoolean();

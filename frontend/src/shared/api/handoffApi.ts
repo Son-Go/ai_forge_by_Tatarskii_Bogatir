@@ -7,6 +7,7 @@ export type Handoff = components['schemas']['Handoff']
 export type QueueItem = components['schemas']['QueueItem']
 export type ManagerReplyInput = operations['replyToHandoff']['requestBody']['content']['application/json']
 export interface AssignedHandoff { handoff: QueueItem; messages: Session['messages'] }
+export const managerQueuePageSize = 50
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const uuid = (v: unknown) => typeof v === 'string' && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(v)
 export function isHandoff(v: unknown): v is Handoff {
@@ -31,7 +32,7 @@ const route = (id: string) => `/api/v1/manager/handoffs/${encodeURIComponent(id)
 export const handoffApi = {
   getSession: (id: string, signal: AbortSignal) => jsonRequest(`/api/v1/sessions/${encodeURIComponent(id)}/handoff`,
     (v): v is { handoff: Handoff | null } => record(v) && (v.handoff === null || isHandoff(v.handoff)), { signal }),
-  list: (token: string, offset: number, signal: AbortSignal) => managerRequest(`/api/v1/manager/handoffs?limit=50&offset=${offset}`, token,
+  list: (token: string, offset: number, signal: AbortSignal) => managerRequest(`/api/v1/manager/handoffs?limit=${managerQueuePageSize + 1}&offset=${offset}`, token,
     (v): v is QueueItem[] => Array.isArray(v) && v.every(isQueueItem), signal),
   read: (token: string, id: string, signal: AbortSignal) => managerRequest(route(id), token, isAssignedHandoff, signal),
   claim: (token: string, id: string, signal: AbortSignal) => managerRequest(`${route(id)}/claim`, token, isQueueItem, signal, undefined, true),

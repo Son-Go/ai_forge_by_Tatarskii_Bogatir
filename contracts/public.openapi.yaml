@@ -130,8 +130,8 @@ paths:
       - $ref: '#/components/parameters/SessionId'
     post:
       operationId: createQuoteDraft
-      summary: Сформировать черновик КП по сохранённому выбору
-      description: Доступность возвращает quotes_enabled. Нужен подтверждённый выбор в сессии. При изменении предложения подтвердите новую карточку через selection. Количество относится к единице выбранной позиции, указанной в предложении.
+      summary: Сформировать КП по сохранённому выбору
+      description: Доступность возвращает quotes_enabled. Нужен подтверждённый выбор в сессии. Сервер сохраняет условия и создаёт новую версию КП. При изменении предложения подтвердите новую карточку через selection. Количество относится к единице выбранной позиции.
       requestBody:
         required: true
         content:
@@ -139,13 +139,38 @@ paths:
             schema: { $ref: '#/components/schemas/QuoteRequest' }
       responses:
         '200':
-          description: Черновик PDF
+          description: PDF коммерческого предложения
           headers:
             Content-Disposition:
               schema: { type: string }
+            X-Quote-Id:
+              description: Идентификатор сохранённой версии КП.
+              schema: { $ref: '#/components/schemas/Uuid' }
+            X-Invoice-Drafts-Enabled:
+              description: Доступность счёта после одобрения КП.
+              schema: { type: boolean }
           content:
             application/pdf:
               schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/sessions/{session_id}/quote-drafts/{quote_id}/approval:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - name: quote_id
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Uuid' }
+    post:
+      operationId: approveQuoteDraft
+      summary: Подтвердить условия конкретной версии КП
+      description: Одобрение идемпотентно. QUOTE_SUPERSEDED означает, что нужно сформировать новую версию. При OFFER_CHANGED подтвердите актуальную карточку, сформируйте новое КП и одобрите его.
+      responses:
+        '204': { description: Условия КП подтверждены }
         '400': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
@@ -157,16 +182,16 @@ paths:
       - $ref: '#/components/parameters/SessionId'
     post:
       operationId: createInvoiceDraft
-      summary: Сформировать PDF-черновик счёта по сохранённому выбору
-      description: Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Цена и валюта берутся из каталога. При изменении предложения возвращается OFFER_CHANGED, после чего нужно подтвердить новую карточку через selection. Черновик предназначен для согласования, выдаётся без реквизитов оплаты и не сохраняется.
+      summary: Получить PDF счёта по одобренному КП
+      description: Доступен при CHAT_INVOICE_DRAFTS_ENABLED=true. Первая выдача требует явного одобрения актуального КП. Позиция, количество, цена и валюта берутся из снимка КП. QUOTE_APPROVAL_REQUIRED означает, что КП нужно одобрить. При изменении условий требуется новое КП и его одобрение. Повтор для того же quote_id возвращает ранее выданный PDF. Документ предназначен для согласования и содержит справочные реквизиты поставщика.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/DocumentDraftRequest' }
+            schema: { $ref: '#/components/schemas/InvoiceDraftRequest' }
       responses:
         '200':
-          description: PDF-черновик счёта
+          description: PDF счёта для согласования
           headers:
             Content-Disposition:
               schema: { type: string }
@@ -224,6 +249,11 @@ components:
     Uuid: { type: string, format: uuid }
     QuoteRequest:
       $ref: '#/components/schemas/DocumentDraftRequest'
+    InvoiceDraftRequest:
+      type: object
+      required: [quote_id]
+      properties:
+        quote_id: { $ref: '#/components/schemas/Uuid' }
     DocumentDraftRequest:
       type: object
       required: [customer_name, quantity]

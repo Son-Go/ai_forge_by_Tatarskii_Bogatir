@@ -99,6 +99,7 @@ def run(args):
             **os.environ,
             "SERVER_PORT": origin.rsplit(":", 1)[1],
             "SERVER_ADDRESS": "127.0.0.1",
+            "MANAGEMENT_SERVER_PORT": "0",
             "SPRING_DATASOURCE_URL": args.jdbc_url,
             "SPRING_DATASOURCE_USERNAME": args.db_user,
             "CATALOG_FEED_FILE": str(feed),
@@ -143,15 +144,15 @@ def run(args):
                 if args.cold_delay:
                     elapsed = time.monotonic() - started
                     assert events[-1] == "done" and answer["status"] == "complete", events
-                    assert timing["budget"] == "cold" and timing["budget_ms"] == "120000", timing
+                    assert timing["budget"] == "cold" and timing["budget_ms"] == "180000", timing
                     assert timing["outcome"] == "recommend" and timing["error_code"] == "null", timing
                     assert int(timing[f"{args.cold_stage}_ms"]) >= args.cold_delay * 1000, timing
                     assert int(timing["first_delta_ms"]) >= args.cold_delay * 1000, timing
-                    assert args.cold_delay <= elapsed < 120
-                    assert args.cold_delay * 1000 < mock.cold_budget <= 120_000
-                    assert 110_000 < mock.interpret_budgets[0] <= 120_000
+                    assert args.cold_delay <= elapsed < 180
+                    assert args.cold_delay * 1000 < mock.cold_budget <= 180_000
+                    assert 175_000 < mock.interpret_budgets[0] <= 180_000
                     assert any(line.startswith(":") and "waiting" in line for line in stream.splitlines())
-                    for idle_seconds, mode, lower, upper in ((0, "warm", 85_000, 90_000), (2.2, "cold", 110_000, 120_000)):
+                    for idle_seconds, mode, lower, upper in ((0, "warm", 85_000, 90_000), (2.2, "cold", 175_000, 180_000)):
                         time.sleep(idle_seconds)
                         followup = json.dumps({"client_message_id": str(uuid.uuid4()), "text": "DemoMail"}).encode()
                         with urlopen(Request(url + "/messages", followup, headers), timeout=10) as response:
@@ -192,8 +193,8 @@ if __name__ == "__main__":
     parser.add_argument("--cold-delay", type=int, default=0, help="Simulate a cold response after this many seconds")
     parser.add_argument("--cold-stage", choices=("interpret", "compose"), default="interpret")
     arguments = parser.parse_args()
-    if arguments.cold_delay != 0 and not 9 <= arguments.cold_delay <= 115:
-        parser.error("--cold-delay must be between 9 and 115 seconds")
+    if arguments.cold_delay != 0 and not 9 <= arguments.cold_delay <= 175:
+        parser.error("--cold-delay must be between 9 and 175 seconds")
     if not arguments.jdbc_url.startswith(("jdbc:postgresql://127.0.0.1:", "jdbc:postgresql://localhost:")):
         parser.error("This check requires PostgreSQL on loopback")
     run(arguments)

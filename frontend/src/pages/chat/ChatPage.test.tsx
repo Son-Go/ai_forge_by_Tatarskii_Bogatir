@@ -12,7 +12,7 @@ it('works through the same HTTP/SSE client in React StrictMode', async () => {
   const user = userEvent.setup()
   render(<StrictMode><ChatPage /></StrictMode>)
   await screen.findByRole('heading', { name: /Поможем найти/ })
-  await user.click(screen.getByRole('button', { name: 'Подобрать решение' }))
+  await user.type(screen.getByRole('textbox', { name: 'Ваше сообщение' }), 'Подобрать решение на 50 пользователей')
   await user.click(screen.getByRole('button', { name: /Отправить/ }))
   await screen.findByRole('button', { name: 'Выбрать' })
   expect(screen.getAllByRole('article', { name: 'Вы' })).toHaveLength(1)

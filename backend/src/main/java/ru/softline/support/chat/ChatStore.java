@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -48,16 +49,18 @@ class ChatStore {
     private final JdbcClient db;
     private final ObjectMapper json;
     private final CatalogSearch catalog;
+    private final DocumentDraftPdf draftPdf;
     private final boolean quotesEnabled;
     private final boolean invoiceDraftsEnabled;
     private final SecureRandom random = new SecureRandom();
 
-    ChatStore(JdbcClient db, ObjectMapper json, CatalogSearch catalog,
+    ChatStore(JdbcClient db, ObjectMapper json, CatalogSearch catalog, DocumentDraftPdf draftPdf,
               @Value("${chat.quotes-enabled:false}") boolean quotesEnabled,
               @Value("${chat.invoice-drafts-enabled:false}") boolean invoiceDraftsEnabled) {
         this.db = db;
         this.json = json;
         this.catalog = catalog;
+        this.draftPdf = draftPdf;
         this.quotesEnabled = quotesEnabled;
         this.invoiceDraftsEnabled = invoiceDraftsEnabled;
     }
@@ -266,14 +269,11 @@ class ChatStore {
         return current;
     }
 
-    @Transactional(noRollbackFor = ChatError.class)
-    public DocumentDraft prepareDraft(UUID id, String token, DocumentDraftRequest input, DraftKind kind) {
+    @Transactional(noRollbackFor = ChatError.class, rollbackFor = IOException.class)
+    public QuotePdf createQuote(UUID id, String token, DocumentDraftRequest input) throws IOException {
         lockOwner(id, token);
-        if (kind == DraftKind.QUOTE && !quotesEnabled) {
-            throw new ChatError(404, "QUOTES_DISABLED", "Черновики КП пока недоступны.");
-        }
-        if (kind == DraftKind.INVOICE && !invoiceDraftsEnabled) {
-            throw new ChatError(404, "INVOICE_DRAFTS_DISABLED", "Черновики счёта пока недоступны.");
+        if (!quotesEnabled) {
+            throw new ChatError(404, "QUOTES_DISABLED", "Формирование КП пока недоступно.");
         }
         if (input == null || input.customerName() == null || input.customerName().isBlank()
                 || input.customerName().length() > 160 || input.customerName().codePoints()
@@ -284,18 +284,103 @@ class ChatStore {
         }
         expire(id);
         requireIdle(id);
-        JsonNode selected = db.sql("SELECT selected_card::text FROM chat_sessions WHERE session_id = ?")
-                .param(id).query(String.class).optional().map(this::tree).orElse(null);
-        if (selected == null || selected.isNull()) {
-            throw new ChatError(409, kind.errorCode("SELECTION_REQUIRED"), "Сначала подтвердите предложение из каталога.");
+        JsonNode selected = selectedCard(id);
+        if (selected.isNull()) {
+            throw new ChatError(409, "QUOTE_SELECTION_REQUIRED", "Сначала подтвердите предложение из каталога.");
         }
-        JsonNode current = revalidateOffer(id, selected);
-        JsonNode price = current.path("price");
-        if (!price.isObject()) {
-            throw new ChatError(409, kind.errorCode("PRICE_UNAVAILABLE"), "Для этой позиции менеджер должен подтвердить цену.");
+        JsonNode card = revalidateOffer(id, selected);
+        if (!card.path("price").isObject()) {
+            throw new ChatError(409, "QUOTE_PRICE_UNAVAILABLE", "Для этой позиции менеджер должен подтвердить цену.");
         }
-        return new DocumentDraft(input.customerName().strip(), current.path("name").asText(),
-                current.path("attributes").path("vendor_code").asText(""), input.quantity().intValueExact(),
+        String customer = input.customerName().strip();
+        int quantity = input.quantity().intValueExact();
+        UUID quoteId = UUID.randomUUID();
+        byte[] pdf = draftPdf.render(documentDraft(card, customer, quantity), DraftKind.QUOTE, quoteId);
+        db.sql("UPDATE quote_drafts SET invalidated_at = now() WHERE session_id = ? AND invalidated_at IS NULL")
+                .param(id).update();
+        db.sql("""
+            INSERT INTO quote_drafts (quote_id, session_id, offer_card, customer_name, quantity)
+            VALUES (?, ?, CAST(? AS jsonb), ?, ?)
+            """).params(quoteId, id, encode(card), customer, quantity).update();
+        return new QuotePdf(quoteId, invoiceDraftsEnabled, pdf);
+    }
+
+    @Transactional(noRollbackFor = ChatError.class)
+    public void approveQuote(UUID id, String token, UUID quoteId) {
+        lockOwner(id, token);
+        SavedQuote quote = findQuote(id, quoteId);
+        requireCurrentQuote(id, quoteId, quote);
+        if (!quote.approved()) {
+            db.sql("UPDATE quote_drafts SET approved_at = now() WHERE quote_id = ?").param(quoteId).update();
+        }
+    }
+
+    @Transactional(noRollbackFor = ChatError.class, rollbackFor = IOException.class)
+    public byte[] issueInvoice(UUID id, String token, InvoiceDraftRequest input) throws IOException {
+        lockOwner(id, token);
+        if (!invoiceDraftsEnabled) {
+            throw new ChatError(404, "INVOICE_DRAFTS_DISABLED", "Формирование счёта пока недоступно.");
+        }
+        if (input == null || input.quoteId() == null) throw ChatErrors.invalid();
+        UUID quoteId = input.quoteId();
+        SavedQuote quote = findQuote(id, quoteId);
+        // The session lock serializes the first issue and concurrent replays.
+        if (quote.invoice() != null) return quote.invoice();
+        requireCurrentQuote(id, quoteId, quote);
+        if (!quote.approved()) {
+            throw new ChatError(409, "QUOTE_APPROVAL_REQUIRED", "Сначала одобрите это коммерческое предложение.");
+        }
+        byte[] pdf = draftPdf.render(documentDraft(quote.card(), quote.customer(), quote.quantity()), DraftKind.INVOICE, quoteId);
+        db.sql("UPDATE quote_drafts SET invoice_pdf = ? WHERE quote_id = ?").params(pdf, quoteId).update();
+        return pdf;
+    }
+
+    private record SavedQuote(JsonNode card, String customer, int quantity, boolean approved,
+                              boolean invalidated, byte[] invoice) {}
+
+    private SavedQuote findQuote(UUID id, UUID quoteId) {
+        return db.sql("""
+            SELECT offer_card::text, customer_name, quantity, approved_at, invalidated_at, invoice_pdf
+            FROM quote_drafts WHERE session_id = ? AND quote_id = ?
+            """).params(id, quoteId).query((rs, row) -> new SavedQuote(tree(rs.getString("offer_card")),
+                    rs.getString("customer_name"), rs.getInt("quantity"), rs.getTimestamp("approved_at") != null,
+                    rs.getTimestamp("invalidated_at") != null, rs.getBytes("invoice_pdf")))
+                .optional().orElseThrow(() -> new ChatError(404, "QUOTE_NOT_FOUND", "Коммерческое предложение не найдено."));
+    }
+
+    private void requireCurrentQuote(UUID id, UUID quoteId, SavedQuote quote) {
+        if (quote.invalidated()) throw supersededQuote();
+        expire(id);
+        requireIdle(id);
+        if (!quote.card().path("offer_id").equals(selectedCard(id).path("offer_id"))) {
+            invalidateQuote(quoteId);
+            throw supersededQuote();
+        }
+        try {
+            revalidateOffer(id, quote.card());
+        } catch (ChatError error) {
+            if ("OFFER_CHANGED".equals(error.code)) invalidateQuote(quoteId);
+            throw error;
+        }
+    }
+
+    private void invalidateQuote(UUID quoteId) {
+        db.sql("UPDATE quote_drafts SET invalidated_at = now() WHERE quote_id = ?").param(quoteId).update();
+    }
+
+    private static ChatError supersededQuote() {
+        return new ChatError(409, "QUOTE_SUPERSEDED", "Сформируйте и одобрите новое коммерческое предложение.");
+    }
+
+    private JsonNode selectedCard(UUID id) {
+        return db.sql("SELECT selected_card::text FROM chat_sessions WHERE session_id = ?")
+                .param(id).query(String.class).optional().map(this::tree).orElseGet(json::nullNode);
+    }
+
+    private static DocumentDraft documentDraft(JsonNode card, String customer, int quantity) {
+        JsonNode price = card.path("price");
+        return new DocumentDraft(customer, card.path("name").asText(),
+                card.path("attributes").path("vendor_code").asText(""), quantity,
                 new BigDecimal(price.path("amount").asText()), price.path("currency").asText());
     }
 

@@ -7,7 +7,8 @@ import { isMessage } from '../shared/api/guards'
 import type { ChatEvent, Message, MessageInput, Session } from '../shared/api/types'
 
 interface TurnRecord { input: MessageInput; userId: string; events: ChatEvent[] }
-interface MockRecord { session: Session; turns: Record<string, TurnRecord>; resumeAt?: number; finalMessage?: Message; changed?: boolean }
+interface MockRecord { session: Session; turns: Record<string, TurnRecord>; resumeAt?: number; finalMessage?: Message; changed?: boolean;
+  activeQuote?: string; quotes?: Record<string, { offerId: string; approved: boolean; issued: boolean }> }
 const db = new Map<string, MockRecord>()
 const storeKey = 'softline:mock:server'
 const uuid = () => crypto.randomUUID()
@@ -58,7 +59,7 @@ export const handlers = [
   http.post('/api/v1/sessions/:id/quote-drafts', async ({ params, request }) => {
     const record = find(params.id)
     if (!record) return error('SESSION_NOT_FOUND', 'Диалог не найден.', 404)
-    if (!record.session.quotes_enabled) return error('QUOTES_DISABLED', 'Черновики КП отключены.', 403)
+    if (!record.session.quotes_enabled) return error('QUOTES_DISABLED', 'Формирование КП отключено.', 403)
     if (record.session.last_turn?.status === 'running') return error('TURN_IN_PROGRESS', 'Дождитесь завершения ответа.', 409)
     const selected = record.session.selected_offer
     if (!selected) return error('NO_SELECTION', 'Сначала выберите предложение.', 400)
@@ -68,7 +69,35 @@ export const handlers = [
       return new HttpResponse('Некорректные параметры демонстрационного КП.', { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
     }
     if (!selected.price || /^0+(\.0+)?$/.test(selected.price.amount)) return error('PRICE_UNCONFIRMED', 'Цену необходимо подтвердить у менеджера.', 409)
-    return new HttpResponse(demoQuotePdf(), { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="DEMO-softline-quote-draft.pdf"' } })
+    const quoteId = uuid()
+    record.activeQuote = quoteId
+    record.quotes ??= {}
+    record.quotes[quoteId] = { offerId: selected.offer_id, approved: false, issued: false }
+    save()
+    return new HttpResponse(demoQuotePdf('quote', quoteId), { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="DEMO-quote.pdf"',
+      'X-Quote-Id': quoteId, 'X-Invoice-Drafts-Enabled': 'true' } })
+  }),
+  http.post('/api/v1/sessions/:id/quote-drafts/:quoteId/approval', ({ params }) => {
+    const record = find(params.id)
+    const quoteId = String(params.quoteId)
+    const quote = record?.quotes?.[quoteId]
+    if (!record || !quote) return error('QUOTE_NOT_FOUND', 'КП не найдено.', 404)
+    if (quoteId !== record.activeQuote || quote.offerId !== record.session.selected_offer?.offer_id) return error('QUOTE_SUPERSEDED', 'Сформируйте новое КП.', 409)
+    quote.approved = true
+    save()
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.post('/api/v1/sessions/:id/invoice-drafts', async ({ params, request }) => {
+    const input: unknown = await request.json().catch(() => null)
+    if (!input || typeof input !== 'object' || !('quote_id' in input) || typeof input.quote_id !== 'string') return error('INVALID_REQUEST', 'Укажите номер КП.', 400)
+    const record = find(params.id)
+    const quote = record?.quotes?.[input.quote_id]
+    if (!record || !quote) return error('QUOTE_NOT_FOUND', 'КП не найдено.', 404)
+    if (!quote.issued && (input.quote_id !== record.activeQuote || quote.offerId !== record.session.selected_offer?.offer_id)) return error('QUOTE_SUPERSEDED', 'Сформируйте новое КП.', 409)
+    if (!quote.approved) return error('QUOTE_APPROVAL_REQUIRED', 'Сначала одобрите КП.', 409)
+    quote.issued = true
+    save()
+    return new HttpResponse(demoQuotePdf('invoice', input.quote_id), { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="DEMO-invoice.pdf"' } })
   }),
   http.post('/api/v1/sessions', () => {
     load()
