@@ -100,7 +100,7 @@ components:
       scheme: bearer
   responses:
     Error:
-      description: Внутренняя ошибка до открытия SSE
+      description: Ошибка внутреннего API
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -127,19 +127,19 @@ components:
         request_id: { $ref: '#/components/schemas/RequestId' }
         candidate_id: { type: string, format: uuid }
         deadline_ms: { $ref: '#/components/schemas/DeadlineMs' }
-        question: { type: string, minLength: 1, maxLength: 500 }
-        answer: { type: string, minLength: 1, maxLength: 2000 }
+        question: { type: string, minLength: 1, maxLength: 500, pattern: '\S' }
+        answer: { type: string, minLength: 1, maxLength: 2000, pattern: '\S' }
         sources:
           type: array
-          minItems: 1
           maxItems: 3
+          description: Выдержки с уникальными ID. Пустой список допустим при отсутствии подтверждения в справке.
           items:
             type: object
             additionalProperties: false
             required: [id, text]
             properties:
               id: { type: string, format: uuid }
-              text: { type: string, minLength: 1, maxLength: 1500 }
+              text: { type: string, minLength: 1, maxLength: 1500, pattern: '\S' }
     FaqReviewResult:
       type: object
       additionalProperties: false
@@ -151,11 +151,12 @@ components:
         answer: { type: [string, 'null'], maxLength: 2000 }
         source_ids:
           type: array
+          description: ID подтверждающих выдержек из текущего запроса.
           uniqueItems: true
           maxItems: 3
           items: { type: string, format: uuid }
-        prompt_version: { type: string, minLength: 1, maxLength: 128 }
-        model_version: { type: string, minLength: 1, maxLength: 128 }
+        prompt_version: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
+        model_version: { type: string, minLength: 1, maxLength: 128, pattern: '\S' }
       allOf:
         - if:
             properties:

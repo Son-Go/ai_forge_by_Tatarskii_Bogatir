@@ -1,6 +1,15 @@
 from typing import Annotated, Literal, TypedDict
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, with_config
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+    with_config,
+)
 
 RequestId = Annotated[
     str, StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
@@ -120,6 +129,66 @@ class Interpretation(InterpretationFields):
 class InterpretResult(InterpretationFields):
     updates: list[ClearUpdate | SetOperation]
     model_version: str
+
+
+FaqQuestion = Annotated[str, StringConstraints(max_length=500)]
+FaqAnswer = Annotated[str, StringConstraints(max_length=2_000)]
+FaqRequestId = Annotated[UUID, Field(strict=False)]
+FaqVersion = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"\S")]
+
+
+class FaqSource(ModelOutput):
+    id: FaqRequestId
+    text: Annotated[str, StringConstraints(min_length=1, max_length=1_500, pattern=r"\S")]
+
+
+class FaqReviewRequest(ModelRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: FaqRequestId
+    question: Annotated[FaqQuestion, StringConstraints(min_length=1, pattern=r"\S")]
+    answer: Annotated[FaqAnswer, StringConstraints(min_length=1, pattern=r"\S")]
+    sources: list[FaqSource] = Field(max_length=3)
+
+    @field_validator("sources")
+    @classmethod
+    def validate_unique_sources(cls, sources: list[FaqSource]) -> list[FaqSource]:
+        if len(sources) != len({source.id for source in sources}):
+            raise ValueError("Duplicate FAQ source IDs")
+        return sources
+
+
+class FaqReview(ModelOutput):
+    verdict: Literal["publish", "needs_review", "case_specific"]
+    reason_code: Literal[
+        "supported", "insufficient_evidence", "incomplete_answer", "case_specific", "unsafe_content"
+    ]
+    question: FaqQuestion | None
+    answer: FaqAnswer | None
+    source_ids: list[UUID] = Field(max_length=3, json_schema_extra={"uniqueItems": True})
+
+    @field_validator("source_ids")
+    @classmethod
+    def validate_unique_source_ids(cls, source_ids: list[UUID]) -> list[UUID]:
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("Duplicate FAQ source IDs")
+        return source_ids
+
+    @model_validator(mode="after")
+    def validate_publish(self) -> "FaqReview":
+        if self.verdict == "publish" and (
+            self.reason_code != "supported"
+            or not (self.question and self.question.strip())
+            or not (self.answer and self.answer.strip())
+            or not self.source_ids
+        ):
+            raise ValueError("Publish requires a supported question, answer and source IDs")
+        return self
+
+
+class FaqReviewResult(FaqReview):
+    prompt_version: FaqVersion
+    model_version: FaqVersion
 
 
 FactId = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"\S")]
