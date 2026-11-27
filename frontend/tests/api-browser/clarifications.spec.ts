@@ -160,11 +160,12 @@ test('manager reads the two new reasons, instruction history and confirmed comme
 // Java reply supplies coupon outcomes, money and handoff decisions.
 async function salesConversation(page: Page, respond: (text: string, index: number) => {
   text: string; terms?: Session['price_terms']; handoff?: Handoff
-}, handoffConfirmation?: Promise<void>) {
+}, handoffConfirmation?: Promise<void>, initiallySelected = true) {
   const selected: Offer = { ...offer, price: { amount: '100', currency: 'RUB' } }
-  const session: Session = { session_id: sessionId, selected_offer: selected, quotes_enabled: false,
+  const session: Session = { session_id: sessionId, selected_offer: initiallySelected ? selected : null, quotes_enabled: false,
     messages: [message('assistant', 'Выбрана тестовая позиция.', { cards: [selected] })], last_turn: null }
   const inputs: string[] = []
+  const selections: unknown[] = []
   let handoff: Handoff | null = null
   let handoffReadsAfterSend = 0
   await page.route('**/api/v1/sessions**', async (route) => {
@@ -172,6 +173,12 @@ async function salesConversation(page: Page, respond: (text: string, index: numb
     if (path.endsWith('/handoff')) {
       if (inputs.length) { handoffReadsAfterSend++; await handoffConfirmation }
       await route.fulfill({ json: { handoff } }); return
+    }
+    if (path.endsWith('/selection')) {
+      expect(request.postDataJSON()).toEqual({ offer_id: selected.offer_id, catalog_version: selected.catalog_version })
+      selections.push(request.postDataJSON())
+      session.selected_offer = selected
+      await route.fulfill({ json: selected }); return
     }
     if (path.endsWith('/messages')) {
       const input = request.postDataJSON() as { text: string; client_message_id: string }
@@ -199,7 +206,7 @@ async function salesConversation(page: Page, respond: (text: string, index: numb
     await expect(page.getByRole('article', { name: 'Вы', exact: true }).last()).toContainText(text)
     await expect(input).toBeEnabled()
   }
-  return { inputs, send, handoffReadsAfterSend: () => handoffReadsAfterSend }
+  return { inputs, send, selections, handoffReadsAfterSend: () => handoffReadsAfterSend }
 }
 
 test('short Нет after the coupon question shows Java price terms and restores them without client-side coupon rules', async ({ page }) => {
@@ -263,4 +270,70 @@ test('Отсрочка нам не нужна remains an ordinary message when J
   await page.reload()
   await expect(page.getByRole('status', { name: 'Автоматическая передача обращения' })).toHaveCount(0)
   expect(scenario.inputs).toEqual([text])
+})
+
+
+for (const question of ['Можно узнать условия отсрочки оплаты?', 'Можно узнать, какие условия отсрочки оплаты?', 'Отсрочку не хочу, можно оплатить сразу картой?']) {
+  test(`ordinary payment information stays a normal Java answer: ${question}`, async ({ page }) => {
+    const text = 'Подтверждённые сведения об условиях оплаты пока отсутствуют. Их нужно уточнить по справке.'
+    const scenario = await salesConversation(page, (input) => {
+      expect(input).toBe(question)
+      return { text }
+    })
+    await scenario.send(question)
+    await expect(page.getByText(text, { exact: true })).toBeVisible()
+    await expect.poll(scenario.handoffReadsAfterSend).toBeGreaterThan(0)
+    await expect(page.getByRole('status', { name: 'Автоматическая передача обращения' })).toHaveCount(0)
+    await page.reload()
+    await expect(page.getByText(text, { exact: true })).toBeVisible()
+    await expect(page.getByRole('status', { name: 'Автоматическая передача обращения' })).toHaveCount(0)
+    expect(scenario.inputs).toEqual([question])
+  })
+}
+
+test('an explicit deferral after an information answer updates the confirmed handoff and restores both answers', async ({ page }) => {
+  const information = 'Общие условия нужно уточнить по справке.', confirmation = 'Заявка на отсрочку передана специалисту.'
+  const scenario = await salesConversation(page, (input, index) => {
+    expect(input).toBe(index === 1 ? 'Можно узнать условия отсрочки оплаты?' : 'Прошу отсрочку оплаты до следующего месяца')
+    return index === 1 ? { text: information } : { text: confirmation, handoff: { handoff_id: caseId, reason: 'payment_deferral', status: 'queued', created_at: at } }
+  })
+  await scenario.send('Можно узнать условия отсрочки оплаты?')
+  await expect(page.getByText(information, { exact: true })).toBeVisible()
+  await expect.poll(scenario.handoffReadsAfterSend).toBeGreaterThan(0)
+  const notice = page.getByRole('status', { name: 'Автоматическая передача обращения' })
+  await expect(notice).toHaveCount(0)
+  await scenario.send('Прошу отсрочку оплаты до следующего месяца')
+  await expect(notice).toContainText(caseId)
+  await expect(notice).toContainText('Ожидаем специалиста')
+  await page.reload()
+  await expect(notice).toContainText(caseId)
+  await expect(page.getByText(information, { exact: true })).toBeVisible()
+  await expect(page.getByText(confirmation, { exact: true })).toBeVisible()
+  expect(scenario.inputs).toHaveLength(2)
+})
+
+test('selection then coupon clarification and Нет show only the price_terms returned by Java', async ({ page }) => {
+  const question = 'Есть ли у вас купон или промокод?'
+  const scenario = await salesConversation(page, (text, index) => {
+    expect(text).toBe(index === 1 ? 'Мне дорого' : 'Нет')
+    return index === 1 ? { text: question } : { text: 'Сервер подтвердил условия после ответа о купоне.',
+      terms: { base_amount: '100', discount_percent: '5', final_amount: '95', currency: 'RUB' } }
+  }, undefined, false)
+  const card = page.getByRole('article', { name: offer.name })
+  await card.getByRole('button', { name: 'Выбрать', exact: true }).click()
+  await expect(card.getByRole('button', { name: 'Выбрано', exact: true })).toBeDisabled()
+  expect(scenario.selections).toHaveLength(1)
+  await scenario.send('Мне дорого')
+  await expect(page.getByText(question, { exact: true })).toBeVisible()
+  const terms = page.getByRole('region', { name: 'Условия предложения' })
+  await expect(terms).toHaveCount(0)
+  await scenario.send('Нет')
+  await expect(terms).toContainText('5%')
+  await expect(terms).toContainText('100')
+  await expect(terms).toContainText('95')
+  await page.reload()
+  await expect(terms).toContainText('95')
+  await expect(card.getByRole('button', { name: 'Выбрано', exact: true })).toBeDisabled()
+  expect(scenario.inputs).toEqual(['Мне дорого', 'Нет'])
+  expect(scenario.selections).toHaveLength(1)
 })

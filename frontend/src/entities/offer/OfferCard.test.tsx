@@ -19,11 +19,12 @@ it('displays the feed status and price, but uses the explicit server permission 
   expect(screen.getByRole('button', { name: 'Выбрать' })).toBeDisabled()
 })
 
-it('defers old cards without permission to server validation rather than guessing from price or availability', () => {
+it('keeps historical cards readable but blocks selection without explicit server permission', () => {
   const select = vi.fn()
   render(<OfferCard offer={{ ...card, price: null, availability: 'unknown' }} onSelect={select} />)
   fireEvent.click(screen.getByRole('button', { name: 'Выбрать' }))
-  expect(select).toHaveBeenCalledOnce()
+  expect(select).not.toHaveBeenCalled()
+  expect(screen.getByRole('button', { name: 'Выбрать' })).toBeDisabled()
   expect(screen.getByText('Цена требует уточнения')).toBeVisible()
 })
 

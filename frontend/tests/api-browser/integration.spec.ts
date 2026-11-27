@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import type { Message, Offer, Source } from '../../src/shared/api/types'
 
 const sessionId = '11111111-1111-4111-8111-111111111111'
 const caseId = '22222222-2222-4222-8222-222222222222'
@@ -158,7 +159,7 @@ test('client reads Java handoff, receives manager replies, keeps drafting, resol
 })
 
 test('quote sends schema fields, keeps the form after errors and approves the downloaded version before invoice', async ({ page }) => {
-  const offer = { offer_id: 'test-offer', catalog_version: sessionId, name: 'Тестовая лицензия на 50 пользователей', product_url: 'https://example.com/product', price: { amount: '12000', currency: 'RUB' }, availability: 'available', attributes: { seats: 50 }, source_ids: [] }
+  const offer = { offer_id: 'test-offer', catalog_version: sessionId, name: 'Тестовая лицензия на 50 пользователей', product_url: 'https://example.com/product', price: { amount: '12000', currency: 'RUB' }, availability: 'available', selectable: true, attributes: { seats: 50 }, source_ids: [] }
   let fail = true
   let requests = 0
   let approval = false
@@ -253,4 +254,98 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   expect((await updatedInvoiceDownload).suggestedFilename()).toBe('test-payment-invoice.pdf')
   await expect(page.getByRole('button', { name: 'Скачать тестовый счёт на оплату' })).toBeVisible()
   expect(invoiceRequests).toEqual([caseId, caseId, quoteId])
+})
+
+const directSource: Source = { id: 'synthetic-template-source', title: 'Тестовый источник Java', kind: 'catalog', url: 'https://example.com/mdaemon', snapshot_at: at }
+const directOffer: Offer = { offer_id: 'synthetic-mdaemon', catalog_version: sessionId, name: 'MDaemon — тестовое продление на 50 пользователей', product_url: directSource.url,
+  price: { amount: '100', currency: 'RUB' }, availability: 'unavailable', selectable: true, attributes: { seats: 50, license_term_months: 12 }, source_ids: [directSource.id] }
+
+for (const sequence of ['searching-delta-done', 'delta-done', 'done-only'] as const) {
+  test(`Java template ${sequence}: authoritative done text, cards and sources end generation and survive reload`, async ({ page }) => {
+    const reply: Message = { id: crypto.randomUUID(), role: 'assistant', status: 'complete', created_at: at, text: 'Нашёл продление MDaemon на 50 пользователей. Проверьте срок лицензии в карточке.', cards: [directOffer], sources: [directSource] }
+    const messages: Message[] = []
+    let posted = false
+    let posts = 0
+    let releaseHistory!: () => void
+    const history = new Promise<void>((resolve) => { releaseHistory = resolve })
+    await page.route('**/api/v1/sessions**', async (route) => {
+      const request = route.request(), path = new URL(request.url()).pathname
+      if (path.endsWith('/handoff')) { await route.fulfill({ json: { handoff: null } }); return }
+      if (path.endsWith('/messages')) {
+        posted = true; posts++
+        const input = request.postDataJSON()
+        const user: Message = { id: crypto.randomUUID(), role: 'user', text: input.text, status: 'complete', created_at: at, cards: [], sources: [] }
+        messages.push(user, reply)
+        const events = [
+          ['accepted', { turn_id: caseId, client_message_id: input.client_message_id, user_message_id: user.id, request_id: 'synthetic-direct' }],
+          ...(sequence === 'searching-delta-done' ? [['status', { stage: 'searching' }]] : []),
+          ...(sequence !== 'done-only' ? [['delta', { seq: 1, text: 'Промежуточная фраза, заменяемая итоговым сообщением.' }]] : []),
+          ['done', { turn_id: caseId, outcome: 'recommend', message: reply }],
+        ]
+        await route.fulfill({ contentType: 'text/event-stream', body: events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('') }); return
+      }
+      if (request.method() === 'POST') { await route.fulfill({ status: 201, json: { session_id: sessionId } }); return }
+      if (posted) await history
+      await route.fulfill({ json: { session_id: sessionId, messages, selected_offer: null, quotes_enabled: false,
+        last_turn: posted ? { turn_id: caseId, status: 'complete', outcome: 'recommend' } : null } })
+    })
+    await page.goto('/')
+    const input = page.getByRole('textbox', { name: 'Ваше сообщение' })
+    await input.fill('Нужно продление MDaemon на 50 пользователей')
+    await page.getByRole('button', { name: 'Отправить', exact: true }).click()
+    // Hold GET history: this must be the actual done.message, not a later GET fix-up.
+    const answer = page.getByRole('article', { name: 'Консультант', exact: true })
+    await expect(answer.getByText(reply.text, { exact: true })).toBeVisible()
+    await expect(answer.getByRole('article', { name: directOffer.name })).toBeVisible()
+    await expect(answer.getByRole('link', { name: directSource.title })).toHaveAttribute('href', directSource.url)
+    await expect(page.getByRole('article', { name: 'Ответ формируется' })).toHaveCount(0)
+    await expect(page.getByText('Промежуточная фраза, заменяемая итоговым сообщением.', { exact: true })).toHaveCount(0)
+    releaseHistory()
+    await expect(input).toBeEnabled()
+    await expect(page.locator('.turn-status .spinner')).toHaveCount(0)
+    await expect(answer).toHaveCount(1)
+    await page.reload()
+    await expect(answer.getByText(reply.text, { exact: true })).toBeVisible()
+    await expect(answer.getByRole('link', { name: directSource.title })).toHaveAttribute('href', directSource.url)
+    await expect(answer.getByRole('article', { name: directOffer.name })).toBeVisible()
+    await expect(input).toBeEnabled()
+    expect(posts).toBe(1)
+  })
+}
+
+test('insufficient_data preserves the edition caveat beside family cards and never infers selection permission', async ({ page }) => {
+  const text = 'В каталоге есть продления MDaemon на 50 пользователей. Редакцию Standard подтвердить не удалось. Если знаете артикул, напишите его.'
+  const denied = { ...directOffer, offer_id: 'synthetic-denied', name: 'Тестовое семейство без разрешения Java', availability: 'available', selectable: false }
+  const legacy = { ...directOffer, offer_id: 'synthetic-no-permission', name: 'Тестовая карточка без флага выбора', selectable: undefined }
+  const reply = { ...message(text), cards: [directOffer, denied, legacy], sources: [directSource] }
+  let selected: Offer | null = null
+  const selections: unknown[] = []
+  await page.route('**/api/v1/sessions**', async (route) => {
+    const request = route.request(), path = new URL(request.url()).pathname
+    if (path.endsWith('/handoff')) { await route.fulfill({ json: { handoff: null } }); return }
+    if (path.endsWith('/selection')) {
+      selections.push(request.postDataJSON())
+      expect(request.postDataJSON()).toEqual({ offer_id: directOffer.offer_id, catalog_version: directOffer.catalog_version })
+      selected = directOffer
+      await route.fulfill({ json: selected }); return
+    }
+    if (request.method() === 'POST') { await route.fulfill({ status: 201, json: { session_id: sessionId } }); return }
+    await route.fulfill({ json: { session_id: sessionId, messages: [reply], selected_offer: selected, quotes_enabled: false,
+      last_turn: { turn_id: caseId, status: 'complete', outcome: 'insufficient_data' } } })
+  })
+  await page.goto('/')
+  const answer = page.getByRole('article', { name: 'Консультант', exact: true })
+  for (let visit = 0; visit < 2; visit++) {
+    await expect(answer.getByText(text, { exact: true })).toBeVisible()
+    await expect(answer.getByRole('link', { name: directSource.title })).toHaveAttribute('href', directSource.url)
+    await expect(answer.getByRole('article', { name: denied.name }).getByRole('button', { name: 'Выбрать', exact: true })).toBeDisabled()
+    await expect(answer.getByRole('article', { name: legacy.name }).getByRole('button', { name: 'Выбрать', exact: true })).toBeDisabled()
+    await expect(answer.getByRole('article', { name: directOffer.name }).getByRole('button', { name: 'Выбрать', exact: true })).toBeEnabled()
+    if (visit === 0) await page.reload()
+  }
+  expect(selections).toHaveLength(0)
+  await answer.getByRole('article', { name: directOffer.name }).getByRole('button', { name: 'Выбрать', exact: true }).click()
+  await expect(answer.getByRole('button', { name: 'Выбрано', exact: true })).toBeDisabled()
+  expect(selections).toHaveLength(1)
+  await expect(answer.getByText(text, { exact: true })).toBeVisible()
 })
