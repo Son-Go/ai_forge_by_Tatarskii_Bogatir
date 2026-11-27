@@ -22,6 +22,15 @@ try {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Обзор" })).toBeVisible();
   await expect(page.locator("#ready")).toHaveText("1");
+  await page.route("**/api/state", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Обновить" }).click();
+  await expect(page.getByRole("button", { name: "Обновляем…" })).toBeDisabled();
+  await expect(page.locator("#refresh-status")).toContainText(/Обновлено в \d{2}:\d{2}:\d{2}/);
+  await page.unroute("**/api/state");
+
   await expect(page.locator("#problem")).toHaveText("2");
   await expect(page.locator("#rollout-status")).toContainText("готовых и запущенных воркеров — 3, запросов в обработке — 2");
   await expect(page.locator("#probe-budget")).toContainText("16 мин");
@@ -89,6 +98,7 @@ try {
   }));
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(daily.getByText("Could not reach Runpod.")).toBeVisible();
+  await expect(page.locator("#refresh-status")).toContainText("Some data is unavailable");
   await page.unroute("**/api/costs");
   await page.setViewportSize({ width: 360, height: 780 });
   await page.getByRole("button", { name: "RU" }).click();

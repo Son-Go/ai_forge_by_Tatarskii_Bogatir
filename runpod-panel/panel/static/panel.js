@@ -25,6 +25,8 @@ let confirmation;
 let operation;
 let stateRequest = 0;
 let pageRequest = 0;
+let refreshing = false;
+let refreshResult;
 
 const t = (key, values) => translate(lang, key, values);
 const number = (value) => value == null ? t("unavailable") : new Intl.NumberFormat(lang).format(value);
@@ -32,6 +34,9 @@ const money = (value) => value == null ? t("unavailable") : new Intl.NumberForma
   style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 12,
 }).format(value);
 const dateTime = (value) => new Intl.DateTimeFormat(lang, { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+const clockSeconds = (value) => new Intl.DateTimeFormat(lang, {
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+}).format(new Date(value));
 const clock = (value) => new Intl.DateTimeFormat(lang, { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 
 function element(tag, text, className) {
@@ -137,6 +142,7 @@ function renderForms() {
 function renderState() {
   const current = state?.endpoint?.data;
   const workers = state?.workers?.data;
+  renderRefreshStatus();
   byId("page-title").textContent = t(page);
   document.title = t(page) + " · Runpod";
   byId("endpoint-name").textContent = current?.name ?? "Runpod Serverless";
@@ -156,7 +162,7 @@ function renderState() {
   byId("review").disabled = operation === "review";
   for (const key of ["ready", "busy", "starting", "problem"]) byId(key).textContent = number(workers?.[key]);
   byId("worker-observed").textContent = workers?.observed_at
-    ? t("observed", { time: clock(workers.observed_at) }) : "";
+    ? t("observed", { time: clockSeconds(workers.observed_at) }) : "";
   const workerNotes = [];
   if (workers?.runtime_active != null || workers?.jobs_in_progress != null) {
     workerNotes.push(t("queue_runtime", {
@@ -194,19 +200,31 @@ function renderState() {
   if (page === "costs") renderEstimate(byId("current-estimate"), state?.estimate);
 }
 
+function renderRefreshStatus() {
+  const button = byId("refresh");
+  const status = byId("refresh-status");
+  button.disabled = refreshing;
+  button.textContent = t(refreshing ? "refreshing" : "refresh");
+  status.hidden = refreshing || !refreshResult;
+  status.textContent = refreshResult
+    ? t(refreshResult.ok ? "refreshed" : "refresh_partial", { time: clockSeconds(refreshResult.time) })
+    : "";
+}
+
 async function refreshState() {
   const sequence = ++stateRequest;
   try {
     const latest = await request("/api/state");
-    if (sequence !== stateRequest) return;
+    if (sequence !== stateRequest) return false;
     state = latest;
     stateError = null;
   } catch (error) {
-    if (sequence !== stateRequest) return;
+    if (sequence !== stateRequest) return false;
     stateError = error.message;
     state = undefined;
   }
   renderState();
+  return Boolean(state?.endpoint?.data && state?.workers?.data && !state.workers.data.runtime_error);
 }
 
 function renderProbe() {
@@ -373,7 +391,7 @@ function renderPageData() {
 }
 
 async function refreshPage() {
-  if (page !== "overview" && page !== "costs") return;
+  if (page !== "overview" && page !== "costs") return true;
   const sequence = ++pageRequest;
   const target = page;
   const keys = target === "overview" ? ["requests", "cold_starts"] : ["today", "week", "month", "balance"];
@@ -383,10 +401,12 @@ async function refreshPage() {
   } catch (error) {
     result = Object.fromEntries(keys.map((key) => [key, { error: error.message }]));
   }
-  if (sequence !== pageRequest || target !== page) return;
+  if (target !== page) return true;
+  if (sequence !== pageRequest) return false;
   if (target === "overview") metrics = result;
   else costs = result;
   renderPageData();
+  return keys.every((key) => result[key]?.error === null);
 }
 
 function showPage() {
@@ -555,10 +575,18 @@ byId("probe").addEventListener("click", async () => {
   }
   renderProbe();
 });
-byId("refresh").addEventListener("click", () => {
+byId("refresh").addEventListener("click", async () => {
+  if (refreshing) return;
   localNotice = null;
-  void refreshState();
-  void refreshPage();
+  refreshing = true;
+  renderRefreshStatus();
+  const results = await Promise.allSettled([refreshState(), refreshPage()]);
+  refreshing = false;
+  refreshResult = {
+    time: Date.now(),
+    ok: results.every((result) => result.status === "fulfilled" && result.value),
+  };
+  renderRefreshStatus();
 });
 byId("billing-period").addEventListener("change", renderCosts);
 all("[data-lang]").forEach((button) => button.addEventListener("click", () => {
@@ -571,7 +599,7 @@ window.addEventListener("resize", () => {
   if (page === "overview") renderCharts();
 });
 setInterval(() => {
-  if (document.hidden) return;
+  if (document.hidden || refreshing) return;
   if (localNotice?.status === "write_pending") localNotice = null;
   void refreshState();
 }, 15000);
@@ -579,7 +607,7 @@ setInterval(() => {
   if (probePending.has(probeResult?.status)) void refreshProbe();
 }, 2500);
 setInterval(() => {
-  if (!document.hidden && page === "overview") void refreshPage();
+  if (!document.hidden && !refreshing && page === "overview") void refreshPage();
 }, 60000);
 
 applyLanguage();

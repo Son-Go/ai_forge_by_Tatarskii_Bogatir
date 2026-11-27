@@ -154,3 +154,6 @@ dialog::backdrop { background: #040a10cc; }
   .section-heading { flex-wrap: wrap; }
   .stats { gap: 15px; }
 }
+
+
+.refresh-controls { display: grid; justify-items: end; gap: .5rem; text-align: right; }
