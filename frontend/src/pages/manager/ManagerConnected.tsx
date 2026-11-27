@@ -4,6 +4,7 @@ import { handoffApi, type AssignedHandoff, type ManagerReplyInput, type QueueIte
 import { ApiError } from '../../shared/api/client'
 import { CaseDetail, ManagerWorkspace } from './ManagerWorkspace'
 import { Icon } from '../../shared/ui/Icon'
+import { FaqReviewPanel } from '../../features/faq/FaqReviewPanel'
 
 function presentation(item: QueueItem, messages: AssignedHandoff['messages'] = []): HandoffCase {
   return { id: item.handoff_id, sessionId: item.session_id, title: handoffReasons[item.reason], reason: item.reason,
@@ -133,7 +134,7 @@ export function ManagerConnected({ token, caseId, onLogout }: { token: string; c
       {context?.error && <p className="manager-feedback" role="alert">{context.error}</p>}
       {actionIssue?.id === caseId && <p className="manager-feedback" role="alert">{actionIssue.message}</p>}
       {context?.data && <>
-        <CaseDetail record={presentation(context.data.handoff, context.data.messages)} />
+        <CaseDetail record={presentation(context.data.handoff, context.data.messages)} faq={context.data.handoff.status === 'resolved' ? <FaqReviewPanel key={caseId} /> : undefined} />
         {context.data.handoff.status === 'in_progress' && <ReplyForm key={caseId} busy={busy} send={(input) => act('reply', input)} />}
       </>}
     </> : undefined} />
