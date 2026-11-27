@@ -2,7 +2,7 @@ import asyncio
 import logging
 import secrets
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from json import JSONDecodeError
 from time import perf_counter
@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.sse import EventSourceResponse, ServerSentEvent
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import TypeAdapter, ValidationError
 
 from . import prompts
@@ -35,6 +36,7 @@ from .schemas import (
     RequestId,
     SetOperation,
 )
+from .telemetry import RunpodCall, registry, usage_log
 
 MAX_BLOCKS = 4
 MAX_BLOCK_JSON_CHARS = 16_384
@@ -105,17 +107,19 @@ async def interpret(
     body: InterpretRequest, provider: Runpod, response: Response
 ) -> InterpretResult:
     deadline = make_deadline(body.deadline_ms)
-    interpretation = await provider.interpret(
-        prompts.INTERPRET, model_payload(body, provider), body.request_id, deadline
-    )
-    updates: list[ClearUpdate | SetOperation] = []
-    for update in interpretation.updates:
-        if update.evidence is not None and update.evidence not in body.text:
-            raise InvalidModelOutput(f"{update.op}_evidence_not_in_current_message")
-        if update.op == "clear":
-            updates.append(ClearUpdate(op="clear", field=update.field))
-        else:
-            updates.append(update)
+    with provider.call("interpret", body.request_id) as call:
+        interpretation = await provider.interpret(
+            prompts.INTERPRET, model_payload(body, provider), call, deadline
+        )
+        updates: list[ClearUpdate | SetOperation] = []
+        for update in interpretation.updates:
+            if update.evidence is not None and update.evidence not in body.text:
+                raise InvalidModelOutput(f"{update.op}_evidence_not_in_current_message")
+            if update.op == "clear":
+                updates.append(ClearUpdate(op="clear", field=update.field))
+            else:
+                updates.append(update)
+        call.succeeded = True
     response.headers["X-Prompt-Version"] = prompts.INTERPRET_VERSION
     return InterpretResult(
         intent=interpretation.intent,
@@ -151,7 +155,7 @@ async def model_lines(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
 @dataclass
 class Composition:
     body: ComposeRequest
-    model_version: str
+    call: RunpodCall
     chunks: AsyncGenerator[str, None]
 
 
@@ -160,12 +164,13 @@ async def open_composition(
 ) -> AsyncGenerator[Composition, None]:
     deadline = make_deadline(body.deadline_ms)
     payload = model_payload(body, provider)
-    chunks = provider.stream(prompts.COMPOSE, payload, body.request_id, deadline)
-    try:
-        yield Composition(body, provider.model_version, chunks)
-    finally:
-        with CancelScope(shield=True):
-            await chunks.aclose()
+    with provider.call("compose", body.request_id) as call:
+        chunks = provider.stream(prompts.COMPOSE, payload, call, deadline)
+        try:
+            yield Composition(body, call, chunks)
+        finally:
+            with CancelScope(shield=True):
+                await chunks.aclose()
 
 
 @router.post(
@@ -215,8 +220,14 @@ async def compose(
         if not block_count:
             raise InvalidModelOutput("missing_compose_blocks")
     except ServiceError as error:
+        if isinstance(error, InvalidModelOutput) and composition.call.usage is None:
+            # Discard unvalidated text while allowing RunPod to finish reporting usage.
+            with suppress(ServiceError):
+                async for _ in composition.chunks:
+                    pass
         yield ServerSentEvent(event="failed", data=error_body(error, body.request_id))
         return
+    composition.call.succeeded = True
     logger.info(
         "Compose complete request_id=%s elapsed_ms=%.0f",
         body.request_id,
@@ -225,7 +236,7 @@ async def compose(
     yield ServerSentEvent(
         event="complete",
         data=Complete(
-            model_version=composition.model_version,
+            model_version=composition.call.model_version,
             prompt_version=prompts.COMPOSE_VERSION,
         ),
     )
@@ -268,34 +279,39 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         config = settings if settings is not None else Settings()
-        app.state.settings = config
-        app.state.runpod = None
-        if not (
-            config.runpod_api_key
-            and config.runpod_endpoint_id
-            and config.runpod_model
-            and config.runpod_model_version
-        ):
-            yield
-            return
-
-        async with httpx.AsyncClient(
-            base_url=f"https://api.runpod.ai/v2/{config.runpod_endpoint_id}/openai/v1/",
-            headers={"Authorization": f"Bearer {config.runpod_api_key.get_secret_value()}"},
-            timeout=httpx.Timeout(MAX_DEADLINE_MS / 1_000, connect=5.0),
-            limits=httpx.Limits(max_connections=config.runpod_max_concurrency),
-            transport=runpod_transport,
-        ) as client:
-            app.state.runpod = RunpodClient(client, config, config.runpod_model_version)
-            try:
+        with usage_log(config.ml_usage_log_file):
+            app.state.settings = config
+            app.state.runpod = None
+            if not (
+                config.runpod_api_key
+                and config.runpod_endpoint_id
+                and config.runpod_model
+                and config.runpod_model_version
+            ):
                 yield
-            finally:
-                app.state.runpod = None
+                return
+
+            async with httpx.AsyncClient(
+                base_url=f"https://api.runpod.ai/v2/{config.runpod_endpoint_id}/openai/v1/",
+                headers={"Authorization": f"Bearer {config.runpod_api_key.get_secret_value()}"},
+                timeout=httpx.Timeout(MAX_DEADLINE_MS / 1_000, connect=5.0),
+                limits=httpx.Limits(max_connections=config.runpod_max_concurrency),
+                transport=runpod_transport,
+            ) as client:
+                app.state.runpod = RunpodClient(client, config, config.runpod_model_version)
+                try:
+                    yield
+                finally:
+                    app.state.runpod = None
 
     app = FastAPI(title="Softline Internal ML API", version="0.1.0", lifespan=lifespan)
     app.add_exception_handler(ServiceError, service_error_response)
     app.add_exception_handler(RequestValidationError, validation_error_response)
     app.include_router(router)
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics() -> Response:
+        return Response(generate_latest(registry), headers={"Content-Type": CONTENT_TYPE_LATEST})
 
     @app.get("/health/live", operation_id="mlLiveness")
     async def live() -> Health:

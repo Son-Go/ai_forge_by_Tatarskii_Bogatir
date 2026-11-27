@@ -4,12 +4,15 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 from starlette.requests import ClientDisconnect
 
 from app.config import Settings
 from app.main import create_app, make_deadline
 
 AUTH = {"Authorization": "Bearer service-test"}
+USAGE = {"prompt_tokens": 41, "completion_tokens": 13}
+USAGE_LOGGER = "uvicorn.error.runpod.usage"
 INTERPRET = {
     "request_id": "req-interpret",
     "deadline_ms": 1_000,
@@ -69,11 +72,9 @@ async def client_for(settings, handler):
         yield client
 
 
-def completion(content):
-    return httpx.Response(
-        200,
-        json={"choices": [{"message": {"content": json.dumps(content)}, "finish_reason": "stop"}]},
-    )
+def completion(content, **metadata):
+    body = {"choices": [{"message": {"content": json.dumps(content)}, "finish_reason": "stop"}]}
+    return httpx.Response(200, json=body | metadata)
 
 
 def chunk(content, *, finish_reason=None):
@@ -92,6 +93,41 @@ def events(response):
         if frame.startswith("event: ")
         for kind, data in [frame.splitlines()]
     ]
+
+
+def usage_event(usage):
+    return f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n"
+
+
+def usage_records(caplog):
+    return [
+        json.loads(record.getMessage()) for record in caplog.records if record.name == USAGE_LOGGER
+    ]
+
+
+async def usage_counters(client, stage):
+    response = await client.get("/metrics")
+    assert response.status_code == 200
+    assert "request_id" not in response.text
+    return {
+        sample.labels.get("direction") or sample.labels["usage_status"]: sample.value
+        for metric in text_string_to_metric_families(response.text)
+        for sample in metric.samples
+        if sample.name.endswith("_total") and sample.labels["stage"] == stage
+    }
+
+
+def assert_usage_record(caplog, stage, status, usage, request_id):
+    [record] = usage_records(caplog)
+    assert record.pop("timestamp")
+    assert record == {
+        "stage": stage,
+        "status": status,
+        "usage_status": "missing" if usage is None else "reported",
+        "model_version": "release-a",
+        "request_id": request_id,
+        **(usage if usage is not None else dict.fromkeys(USAGE)),
+    }
 
 
 def unexpected_request(_):
@@ -258,6 +294,7 @@ async def test_compose_buffers_partial_chunks_and_validates_each_block(settings)
     def handler(request):
         body = json.loads(request.content)
         assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
         assert body["temperature"] == 0
         assert body["chat_template_kwargs"] == {"enable_thinking": False}
         assert json.loads(body["messages"][1]["content"])["facts"] == COMPOSE["facts"]
@@ -289,6 +326,105 @@ async def test_compose_returns_failed_for_invalid_or_interrupted_stream(settings
     result = events(response)
     assert [kind for kind, _ in result] == ["block", "failed"]
     assert result[-1][1]["code"] == "MODEL_INVALID_OUTPUT"
+
+
+@pytest.mark.parametrize("valid", [True, False])
+async def test_interpret_counts_usage_even_if_validation_fails(settings, caplog, valid):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+    result = RESULT if valid else RESULT | {"updates": [{"op": "invalid"}]}
+    async with client_for(settings, lambda _: completion(result, usage=USAGE)) as client:
+        before = await usage_counters(client, "interpret")
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+        after = await usage_counters(client, "interpret")
+    assert response.status_code == (200 if valid else 503)
+    assert_usage_record(caplog, "interpret", "ok" if valid else "error", USAGE, "req-interpret")
+    assert after == before | {
+        "input": before["input"] + 41,
+        "output": before["output"] + 13,
+        "reported": before["reported"] + 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"usage": None},
+        {"usage": {"prompt_tokens": True, "completion_tokens": 13}},
+        {"usage": {"prompt_tokens": 41, "completion_tokens": -1}},
+        {"usage": {"prompt_tokens": 10**400, "completion_tokens": 13}},
+        {"usage": {"prompt_tokens": 41}},
+    ],
+)
+async def test_interpret_missing_or_invalid_usage_preserves_answer(settings, caplog, metadata):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+    async with client_for(settings, lambda _: completion(RESULT, **metadata)) as client:
+        before = await usage_counters(client, "interpret")
+        response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
+        after = await usage_counters(client, "interpret")
+    assert response.status_code == 200
+    assert_usage_record(caplog, "interpret", "ok", None, "req-interpret")
+    assert after == before | {"missing": before["missing"] + 1}
+
+
+@pytest.mark.parametrize("usage_events", [1, 2])
+async def test_compose_counts_final_usage_once_per_call(settings, caplog, usage_events):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+    block = chunk('{"text":"До 50.","fact_ids":["seats"]}\n')
+    upstream = block + usage_event(USAGE) * usage_events + "data: [DONE]\n\n"
+    async with client_for(settings, lambda _: sse_response(upstream)) as client:
+        before = await usage_counters(client, "compose")
+        # A new provider call with the same request_id has its own usage.
+        for _ in range(2):
+            caplog.clear()
+            response = await client.post("/internal/v1/compose", json=COMPOSE, headers=AUTH)
+            assert [kind for kind, _ in events(response)] == ["block", "complete"]
+            assert_usage_record(caplog, "compose", "ok", USAGE, "req-compose")
+        after = await usage_counters(client, "compose")
+    assert after == before | {
+        "input": before["input"] + 82,
+        "output": before["output"] + 26,
+        "reported": before["reported"] + 2,
+    }
+
+
+@pytest.mark.parametrize("done", [True, False])
+async def test_compose_without_usage_in_complete_or_interrupted_stream(settings, caplog, done):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+    upstream = chunk('{"text":"До 50.","fact_ids":["seats"]}\n')
+    if done:
+        upstream += "data: [DONE]\n\n"
+    async with client_for(settings, lambda _: sse_response(upstream)) as client:
+        before = await usage_counters(client, "compose")
+        response = await client.post("/internal/v1/compose", json=COMPOSE, headers=AUTH)
+        after = await usage_counters(client, "compose")
+    assert [kind for kind, _ in events(response)] == ["block", "complete" if done else "failed"]
+    assert_usage_record(caplog, "compose", "ok" if done else "error", None, "req-compose")
+    assert after == before | {"missing": before["missing"] + 1}
+
+
+@pytest.mark.parametrize(
+    "invalid_block",
+    [
+        chunk('{"text":"Недостоверно","fact_ids":["unknown"]}\n'),
+        chunk(None, finish_reason="length"),
+    ],
+)
+async def test_compose_keeps_final_usage_after_validation_error(settings, caplog, invalid_block):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+    upstream = invalid_block + usage_event(USAGE) + "data: [DONE]\n\n"
+    async with client_for(settings, lambda _: sse_response(upstream)) as client:
+        before = await usage_counters(client, "compose")
+        response = await client.post("/internal/v1/compose", json=COMPOSE, headers=AUTH)
+        after = await usage_counters(client, "compose")
+    [(kind, error)] = events(response)
+    assert kind == "failed" and error["code"] == "MODEL_INVALID_OUTPUT"
+    assert_usage_record(caplog, "compose", "error", USAGE, "req-compose")
+    assert after == before | {
+        "input": before["input"] + 41,
+        "output": before["output"] + 13,
+        "reported": before["reported"] + 1,
+    }
 
 
 async def test_provider_error_contains_no_upstream_payload(settings):
@@ -328,7 +464,8 @@ async def test_deadline_bounds_upstream_wait(settings, path, body):
     assert error["code"] == "MODEL_TIMEOUT"
 
 
-async def test_waiting_for_provider_slot_counts_toward_deadline(settings):
+async def test_waiting_for_provider_slot_counts_toward_deadline(settings, caplog):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
     started = asyncio.Event()
     finish = asyncio.Event()
     calls = 0
@@ -359,10 +496,12 @@ async def test_waiting_for_provider_slot_counts_toward_deadline(settings):
     assert response.status_code == 503
     assert response.json()["code"] == "MODEL_TIMEOUT"
     assert calls == 1
+    assert_usage_record(caplog, "interpret", "ok", None, "req-interpret")
 
 
 @pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])
-async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asgi_version):
+async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asgi_version, caplog):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
     class HangingStream(httpx.AsyncByteStream):
         closed = False
 
@@ -412,3 +551,4 @@ async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asg
             assert not app.state.runpod.slots.locked()
 
     await disconnect()
+    assert_usage_record(caplog, "compose", "error", None, "req-compose")

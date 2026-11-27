@@ -12,6 +12,9 @@ services:
       RUNPOD_MAX_CONCURRENCY: ${RUNPOD_MAX_CONCURRENCY:-1}
       RUNPOD_RESPONSE_FORMAT: ${RUNPOD_RESPONSE_FORMAT:-prompt}
       ML_MAX_CONTEXT_BYTES: ${ML_MAX_CONTEXT_BYTES:-24000}
+      ML_USAGE_LOG_FILE: /var/log/ml-service/runpod-usage.jsonl
+    volumes:
+      - ml-usage-logs:/var/log/ml-service
     healthcheck:
       test:
         - CMD
@@ -22,3 +25,6 @@ services:
       timeout: 3s
       retries: 3
     restart: unless-stopped
+
+volumes:
+  ml-usage-logs:
