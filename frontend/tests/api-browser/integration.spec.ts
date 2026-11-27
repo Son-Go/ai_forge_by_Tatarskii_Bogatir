@@ -164,6 +164,8 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   let approval = false
   let offerChanged = false
   let quoteId = caseId
+  let selectedOffer = offer
+  const updatedOffer = { ...offer, catalog_version: caseId, price: { amount: '13000', currency: 'RUB' }, name: 'Лицензия с обновлённой ценой' }
   const invoiceRequests: string[] = []
   await page.route('**/api/v1/sessions**', async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname
@@ -181,14 +183,19 @@ test('quote sends schema fields, keeps the form after errors and approves the do
       expect(input).toEqual({ quote_id: quoteId })
       if (offerChanged) {
         await route.fulfill({ status: 409, json: { ...error, code: 'OFFER_CHANGED',
-          updated_offer: { ...offer, catalog_version: caseId, name: 'Лицензия с обновлённой ценой' } } }); return
+          updated_offer: updatedOffer } }); return
       }
       invoiceRequests.push(input.quote_id)
       await route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n% SYNTHETIC INVOICE PDF' }); return
     }
+    if (path.endsWith('/selection')) {
+      expect(request.postDataJSON()).toEqual({ offer_id: offer.offer_id, catalog_version: updatedOffer.catalog_version })
+      selectedOffer = updatedOffer
+      await route.fulfill({ json: updatedOffer }); return
+    }
     if (path.endsWith('/handoff')) { await route.fulfill({ json: { handoff: null } }); return }
     if (request.method() === 'POST') { await route.fulfill({ status: 201, json: { session_id: sessionId } }); return }
-    await route.fulfill({ json: { session_id: sessionId, last_turn: null, quotes_enabled: true, selected_offer: offer, messages: [{ ...message('Тестовая рекомендация'), cards: [offer] }] } })
+    await route.fulfill({ json: { session_id: sessionId, last_turn: null, quotes_enabled: true, selected_offer: selectedOffer, messages: [{ ...message('Тестовая рекомендация'), cards: [offer] }] } })
   })
   await page.goto('/')
   await page.getByRole('button', { name: 'Сформировать КП', exact: true }).click()
@@ -204,14 +211,16 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   const download = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
   expect((await download).suggestedFilename()).toBe('quote.pdf')
-  const invoice = page.getByRole('button', { name: 'Скачать счёт' })
+  await expect(page.getByText('Счёт для согласования. Оплата по этому документу не предусмотрена.')).toBeVisible()
+  await expect(page.locator('html')).toHaveJSProperty('scrollWidth', page.viewportSize()!.width)
+  const invoice = page.getByRole('button', { name: 'Скачать счёт для согласования' })
   await expect(invoice).toHaveCount(0)
   const issuedDownload = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Одобрить КП и получить счёт' }).click()
-  expect((await issuedDownload).suggestedFilename()).toBe('invoice.pdf')
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' }).click()
+  expect((await issuedDownload).suggestedFilename()).toBe('invoice-for-review.pdf')
   const repeatedDownload = page.waitForEvent('download')
   await invoice.click()
-  expect((await repeatedDownload).suggestedFilename()).toBe('invoice.pdf')
+  expect((await repeatedDownload).suggestedFilename()).toBe('invoice-for-review.pdf')
   expect(invoiceRequests).toEqual([caseId, caseId])
   quoteId = crypto.randomUUID()
   approval = false
@@ -219,8 +228,25 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
   await newDownload
   offerChanged = true
-  await page.getByRole('button', { name: 'Одобрить КП и получить счёт' }).click()
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' }).click()
   await expect(page.getByRole('heading', { name: 'Обновлённое предложение' })).toBeVisible()
   await expect(page.getByText('Лицензия с обновлённой ценой', { exact: true })).toBeVisible()
   await expect(invoice).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' })).toHaveCount(0)
+  await page.getByRole('article', { name: updatedOffer.name }).getByRole('button', { name: 'Выбрать', exact: true }).click()
+  await page.getByRole('button', { name: 'Сформировать КП', exact: true }).click()
+  await customer.fill('Синтетический заказчик')
+  offerChanged = false
+  approval = false
+  quoteId = crypto.randomUUID()
+  const updatedQuoteDownload = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
+  await updatedQuoteDownload
+  await expect(invoice).toHaveCount(0)
+  expect(approval).toBe(false)
+  expect(invoiceRequests).toEqual([caseId, caseId])
+  const updatedInvoiceDownload = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт для согласования' }).click()
+  expect((await updatedInvoiceDownload).suggestedFilename()).toBe('invoice-for-review.pdf')
+  expect(invoiceRequests).toEqual([caseId, caseId, quoteId])
 })
