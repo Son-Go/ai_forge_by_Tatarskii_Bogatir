@@ -419,16 +419,22 @@ class ReplyPlanner {
     }
 
     private static Match editionMatch(Offer offer, String edition) {
-        // The feed also uses «Версия» for license terms, which cannot establish a product edition.
-        if (offer.edition() == null || LICENSE_VERSION.matcher(normalize(offer.edition())).matches()) {
+        String actual = productEdition(offer);
+        if (actual == null) {
             return CatalogSearch.mentions(offer.name(), edition) ? Match.CONFIRMED : Match.UNKNOWN;
         }
-        return CatalogSearch.mentions(offer.edition(), edition) ? Match.CONFIRMED : Match.CONFLICT;
+        return CatalogSearch.mentions(actual, edition) ? Match.CONFIRMED : Match.CONFLICT;
+    }
+
+    private static String productEdition(Offer offer) {
+        // The feed also uses «Версия» for license terms, which cannot establish a product edition.
+        String version = offer.edition();
+        return version == null || LICENSE_VERSION.matcher(normalize(version)).matches() ? null : version;
     }
 
     private static Object attribute(Offer offer, String field) {
         return switch (field) {
-            case "edition" -> offer.edition();
+            case "edition" -> productEdition(offer);
             case "license_kind" -> offer.licenseKind();
             case "seats" -> offer.seats();
             case "license_term_months" -> offer.term();

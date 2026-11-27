@@ -50,6 +50,16 @@ RESPONSE_FEED = """<yml_catalog date="2026-11-26 12:00">
                 <param name="Срок действия">12 мес.</param>
                 <param name="Версия">Продление подписки на обновления на 1 год</param>
             </offer>
+            <offer id="mail-new" available="true">
+                <name>MDaemon Messaging Server лицензия на два года</name>
+                <url>https://example.test/mail-new</url>
+                <price>150</price>
+                <currencyId>RUB</currencyId>
+                <param name="К-во пользователей до">50</param>
+                <param name="Тип лицензии">Полная версия</param>
+                <param name="Срок действия">24 мес.</param>
+                <param name="Версия">Лицензия на 2 года</param>
+            </offer>
             <offer id="bat-pro" available="true">
                 <name>The Bat! Лицензия Professional</name>
                 <url>https://example.test/bat-pro</url>
@@ -398,7 +408,8 @@ def exercise_responses(origin, mock, sql):
 
     path, cookie = new_session()
     first = interpretation("Нужна лицензия MDaemon на 50 пользователей", "known_product", "MDaemon",
-                           [("product_name", "MDaemon", "MDaemon"), ("seats", 50, "50 пользователей")])
+                           [("product_name", "MDaemon", "MDaemon"), ("seats", 50, "50 пользователей")],
+                           candidates=["edition"])
     recommendation = ask(path, cookie, first)
     assert recommendation["cards"][0]["attributes"]["seats"] == 50
     second = interpretation("Исправь на 20 пользователей", "known_product", "MDaemon",
