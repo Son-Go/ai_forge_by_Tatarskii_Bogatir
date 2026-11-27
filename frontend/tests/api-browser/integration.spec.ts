@@ -25,6 +25,7 @@ test('manager claims, reads, retries a reply with the same ID, resolves and reta
     reads.push(`${request.method()} ${url.pathname}`)
     if (url.pathname.endsWith('/claim')) { assigned = true; record.status = 'in_progress'; await route.fulfill({ json: record }); return }
     if (url.pathname.endsWith('/resolve')) { record.status = 'resolved'; await route.fulfill({ json: record }); return }
+    if (url.pathname.endsWith('/faq')) { await route.fulfill({ json: { candidate: null } }); return }
     if (request.method() === 'POST' && url.pathname.endsWith('/messages')) {
       const input = request.postDataJSON() as { message_id: string; text: string }
       replies.push(input)

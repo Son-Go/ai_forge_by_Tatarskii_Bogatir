@@ -2,7 +2,10 @@ import type { Source } from '../../shared/api/types'
 import { formatDate, safeUrl } from '../../shared/lib/presentation'
 import { Icon } from '../../shared/ui/Icon'
 
-export function SourcesList({ sources }: { sources: Source[] }) {
+export type DisplaySource = Omit<Source, 'snapshot_at' | 'checked_at'> &
+  Pick<Partial<Source>, 'snapshot_at' | 'checked_at'>
+
+export function SourcesList({ sources }: { sources: DisplaySource[] }) {
   if (!sources.length) return null
   return <details className="sources" open><summary><Icon name="book" /><span>Источники ответа</span><span className="source-count">{sources.length}</span><Icon name="down" /></summary><ul>
     {sources.map((source) => {

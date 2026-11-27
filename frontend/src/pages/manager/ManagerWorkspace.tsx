@@ -10,7 +10,7 @@ function StatusBadge({ status }: { status: CaseStatus }) {
   return <span className={`case-status case-status-${status}`}><span />{caseStatuses[status]}</span>
 }
 
-export function CaseDetail({ record }: { record: HandoffCase }) {
+export function CaseDetail({ record, faq }: { record: HandoffCase; faq?: ReactNode }) {
   return <article className="case-detail" key={record.id} aria-label={`Обращение ${record.id}`}>
     <header className="case-heading"><div><a className="back-to-queue" href="#/manager"><Icon name="back" />К очереди</a><span className="eyebrow">{record.id} · веб-чат · демо</span><h2>{record.title}</h2>
       <p><Icon name="clock" /><time dateTime={record.createdAt}>{formatDate(record.createdAt)}</time><span>Доступный контекст обращения</span></p></div><StatusBadge status={record.status} /></header>
@@ -23,6 +23,7 @@ export function CaseDetail({ record }: { record: HandoffCase }) {
       <CaseTimeline messages={record.messages} />
       <p className="timeline-note muted">Журнал действий, изменений статуса и документов не передаётся текущим API.</p>
     </section>
+    {faq}
     <section className="case-section" aria-label="Рассмотренные предложения"><div className="case-section-title"><h3>Рассмотренные предложения</h3><span>{record.offers.length}</span></div>
       {record.offers.length ? <div className="offer-grid">{record.offers.map((offer) => <OfferCard key={`${offer.offer_id}:${offer.catalog_version}`} offer={offer} sources={record.sources} readOnly />)}</div> : <p className="muted">Конкретные позиции ещё не были предложены.</p>}
       <SourcesList sources={record.sources} />
