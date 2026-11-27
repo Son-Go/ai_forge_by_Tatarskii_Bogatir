@@ -529,8 +529,33 @@ async def test_compose_buffers_partial_chunks_and_validates_each_block(settings)
     assert events(response) == [
         ("block", block),
         ("block", block),
-        ("complete", {"model_version": "release-a", "prompt_version": "compose-1"}),
+        ("complete", {"model_version": "release-a", "prompt_version": "compose-2"}),
     ]
+
+
+@pytest.mark.parametrize(
+    "fact",
+    [
+        {"id": "guide", "text": "Откройте «Лицензии» и скопируйте ключ из личного кабинета."},
+        {"id": "sale", "text": "Цена 1000 RUB за единицу, скидка 5%, итог 950 RUB за единицу."},
+    ],
+)
+async def test_compose_reuses_approved_support_and_sale_facts(settings, fact):
+    block = {"text": fact["text"], "fact_ids": [fact["id"]]}
+    upstream = chunk(json.dumps(block, ensure_ascii=False) + "\n") + "data: [DONE]\n\n"
+
+    def handler(request):
+        payload = json.loads(request.content)
+        assert json.loads(payload["messages"][1]["content"])["facts"] == [fact]
+        return sse_response(upstream)
+
+    async with client_for(settings, handler) as client:
+        response = await client.post(
+            "/internal/v1/compose", json=COMPOSE | {"facts": [fact]}, headers=AUTH
+        )
+    assert response.status_code == 200
+    assert events(response)[0] == ("block", block)
+    assert events(response)[-1][0] == "complete"
 
 
 @pytest.mark.parametrize(

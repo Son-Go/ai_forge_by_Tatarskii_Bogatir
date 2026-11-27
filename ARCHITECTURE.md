@@ -267,7 +267,7 @@ FastAPI работает во внутренней сети с доступом 
 
 | Маршрут | Вход | Выход |
 | --- | --- | --- |
-| `POST /internal/v1/interpret` | `request_id`, `deadline_ms`, `text`, `conversation_context`, `requirements` | JSON с `intent`, `product_query`, `updates`, `clarification_candidates` и версией модели. |
+| `POST /internal/v1/interpret` | `request_id`, `deadline_ms`, `text`, `conversation_context`, `requirements` | JSON с `intent`, `product_query`, `updates`, `clarification_candidates`, `signals` и версией модели. |
 | `POST /internal/v1/compose` | `request_id`, `deadline_ms`, `outcome`, `facts`, `language` | SSE `block` с `text` и `fact_ids`, затем `complete`. В случае ошибки возвращает `failed` или HTTP-ошибку до открытия потока. |
 | `GET /health/live`, `GET /health/ready` | Локальные проверки процесса и загрузки конфигурации. | Состояние FastAPI. Проверка модели выполняется отдельным smoke-запросом. |
 
@@ -287,11 +287,14 @@ FastAPI работает во внутренней сети с доступом 
     {"op":"set","field":"seats","value":50,"evidence":"50 пользователей"}
   ],
   "clarification_candidates": ["license_term_months"],
+  "signals": [],
   "model_version": "qwen3-32b-awq-base"
 }
 ```
 
-`compose` принимает готовые факты с компактными `id`, `kind` и значениями. Текст карточки и ссылки отображаются из Java. Для модельного пояснения буферизуем законченный блок, проверяем идентификаторы, формат и конкретные цены или параметры перед выдачей в браузер. Наличие ссылки на факт помогает проверке. Смысловую точность пересказа дополнительно оцениваем на контрольных диалогах.
+`signals` содержит темы доставки и активации ключа, возврата, неудачной инструкции, возражения о цене и просьбы об отсрочке. История помогает понять контекст, а каждый сигнал подкреплён дословной цитатой текущей реплики. Spring Boot решает, какой источник показать, предложить ли скидку и когда передать обращение менеджеру.
+
+`compose` принимает подтверждённые Java факты с `id` и `text`. Это могут быть шаги из справки или согласованные цена, скидка и итог. Модель возвращает текстовые блоки со ссылками на ID фактов. FastAPI проверяет формат и ID, а Java отправляет в браузер исходный текст этих фактов, карточки и ссылки. Смысловую точность пересказа оцениваем на контрольных диалогах.
 
 Промпты, контракты Pydantic и код нормализации ответа версионируются вместе. На выбранном образе Runpod отдельно проверяем передачу `response_format` и `chat_template_kwargs`. По поддерживаемому пути применяем JSON Schema, иначе FastAPI запрашивает строгий JSON, валидирует его и возвращает типизированную ошибку при нарушении схемы. Для `compose` HTTP-клиент получает поток от vLLM и преобразует его в проверяемые блоки. [SSE в FastAPI](https://fastapi.tiangolo.com/tutorial/server-sent-events/), [Structured Outputs в vLLM](https://docs.vllm.ai/en/latest/features/structured_outputs/), [OpenAI-совместимый интерфейс Runpod](https://docs.runpod.io/serverless/vllm/openai-compatibility)
 
