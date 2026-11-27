@@ -352,6 +352,7 @@ async def test_interpret_counts_usage_even_if_validation_fails(settings, caplog,
         {"usage": None},
         {"usage": {"prompt_tokens": True, "completion_tokens": 13}},
         {"usage": {"prompt_tokens": 41, "completion_tokens": -1}},
+        {"usage": {"prompt_tokens": 10**400, "completion_tokens": 13}},
         {"usage": {"prompt_tokens": 41}},
     ],
 )
@@ -499,7 +500,8 @@ async def test_waiting_for_provider_slot_counts_toward_deadline(settings, caplog
 
 
 @pytest.mark.parametrize("asgi_version", ["2.3", "2.4"])
-async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asgi_version):
+async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asgi_version, caplog):
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
     class HangingStream(httpx.AsyncByteStream):
         closed = False
 
@@ -549,3 +551,4 @@ async def test_stream_disconnect_closes_provider_and_releases_slot(settings, asg
             assert not app.state.runpod.slots.locked()
 
     await disconnect()
+    assert_usage_record(caplog, "compose", "error", None, "req-compose")

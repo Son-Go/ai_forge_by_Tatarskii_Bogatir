@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from prometheus_client import CollectorRegistry, Counter
 from pydantic import BaseModel, Field, ValidationError
 
 Stage = Literal["interpret", "compose"]
+# Prometheus stores counter samples as float64.
+TokenCount = Annotated[int, Field(strict=True, ge=0, le=2**53 - 1)]
 logger = logging.getLogger("uvicorn.error.runpod.usage")
 registry = CollectorRegistry()
 tokens = Counter(
@@ -29,8 +31,8 @@ for stage in ("interpret", "compose"):
 
 
 class Usage(BaseModel):
-    prompt_tokens: int = Field(strict=True, ge=0)
-    completion_tokens: int = Field(strict=True, ge=0)
+    prompt_tokens: TokenCount
+    completion_tokens: TokenCount
 
 
 class UsageEnvelope(BaseModel):
