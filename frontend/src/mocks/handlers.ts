@@ -25,6 +25,9 @@ function exampleMessage(raw: string): Message {
 }
 const clarification = exampleMessage(clarifyExample)
 const recommendation = exampleMessage(recommendExample)
+// The historical SSE example omits this optional field; the current demo server
+// explicitly permits its synthetic recommendation, like Java does for new cards.
+recommendation.cards = recommendation.cards.map((card) => ({ ...card, selectable: true }))
 const failureLine = failedExample.split('\n').find((x) => x.startsWith('data: ') && x.includes('"retryable"'))
 const failure = JSON.parse(failureLine!.slice(6)) as { code: string; message: string; retryable: boolean }
 
