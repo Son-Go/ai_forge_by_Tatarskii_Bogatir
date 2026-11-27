@@ -30,6 +30,7 @@ class RunpodMock:
         self.cost_fault = False
         self.probe_fault = False
         self.probe_job_status = "COMPLETED"
+        self.probe_output = [{"choices": [{"message": {"content": "OK."}}]}]
         self.probe_status_fault = False
         self.probe_submissions = []
         self.health_fault = False
@@ -69,7 +70,7 @@ class RunpodMock:
                 json={
                     "id": "probe-fixture",
                     "status": self.probe_job_status,
-                    "output": [{"choices": [{"message": {"content": "OK"}}]}],
+                    "output": self.probe_output,
                 },
             )
         if path.endswith("/chat/completions"):

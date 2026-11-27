@@ -327,10 +327,16 @@ class Runpod:
         choices = result.get("choices")
         if not isinstance(choices, list) or not choices:
             return "probe_no_answer"
-        answer = mapping(mapping(choices[0]).get("message")).get("content")
-        return (
-            "probe_ok" if isinstance(answer, str) and answer.strip() == "OK" else "probe_unexpected"
-        )
+        choice = mapping(choices[0])
+        answer = mapping(choice.get("message")).get("content")
+        if not isinstance(answer, str) or not answer.strip():
+            return (
+                "probe_token_limit"
+                if choice.get("finish_reason") == "length"
+                else "probe_no_answer"
+            )
+        normalized = answer.strip().strip("\"'«»“”").strip().rstrip(".!").casefold()
+        return "probe_ok" if normalized == "ok" else "probe_reply_received"
 
     def _queued_status(self, data: dict) -> str:
         status = data.get("status")
@@ -380,7 +386,7 @@ class Runpod:
         payload = {
             "model": self.config.model,
             "messages": [{"role": "user", "content": "Reply with exactly OK. /no_think"}],
-            "max_tokens": 16,
+            "max_tokens": 64,
             "chat_template_kwargs": {"enable_thinking": False},
             "temperature": 0,
             "stream": False,

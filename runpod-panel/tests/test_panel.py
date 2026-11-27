@@ -417,3 +417,23 @@ def test_queue_probe_reports_provider_terminal_status(client, mock, remote, stat
     mock.probe_job_status = remote
     assert client.post("/api/probe").json()["status"] == "probe_queued"
     assert client.get("/api/probe").json()["status"] == status
+
+
+@pytest.mark.parametrize(
+    "content,finish_reason,expected",
+    [
+        (" «ok.» ", "stop", "probe_ok"),
+        ("Another reply from the model", "stop", "probe_reply_received"),
+        (" ", "stop", "probe_no_answer"),
+        (None, "length", "probe_token_limit"),
+    ],
+)
+def test_probe_distinguishes_text_from_exact_match(client, mock, content, finish_reason, expected):
+    mock.probe_output = [
+        {"choices": [{"message": {"content": content}, "finish_reason": finish_reason}]}
+    ]
+    assert client.post("/api/probe").json()["status"] == "probe_queued"
+    result = client.get("/api/probe").json()
+    assert set(result) == {"status", "elapsed_ms"}
+    assert result["status"] == expected
+    assert mock.probe_submissions[0]["input"]["openai_input"]["max_tokens"] == 64
