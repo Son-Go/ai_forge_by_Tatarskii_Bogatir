@@ -1,0 +1,6 @@
+<yml_catalog date="2026-11-27 14:00"><shop><offers>
+<offer id="demo-mail" available="true">
+<name>DemoMail</name><url>https://example.com/demo</url>
+<price>100</price><currencyId>RUB</currencyId><description>Синтетическая лицензия для проверки.</description>
+</offer>
+</offers></shop></yml_catalog>
