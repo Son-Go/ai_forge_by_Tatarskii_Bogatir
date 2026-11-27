@@ -18,11 +18,25 @@ export const chatApi: ChatApi = {
   },
   getSession: (id, signal) => jsonRequest(`/api/v1/sessions/${encodeURIComponent(id)}`, isSession, { signal }),
   async sendMessage(id, input, onEvent, signal) {
-    const response = await requireOk(await fetch(new URL(`/api/v1/sessions/${encodeURIComponent(id)}/messages`, window.location.origin), {
-      method: 'POST', credentials: 'same-origin', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(input),
-    }))
-    await readChatStream(response, onEvent)
+    const idle = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // The server sends heartbeat comments every eight seconds during cold starts.
+    const received = () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => idle.abort(), 30_000)
+    }
+    received()
+    try {
+      const response = await requireOk(await fetch(new URL(`/api/v1/sessions/${encodeURIComponent(id)}/messages`, window.location.origin), {
+        method: 'POST', credentials: 'same-origin',
+        signal: AbortSignal.any([signal, idle.signal, AbortSignal.timeout(21 * 60_000)]),
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(input),
+      }))
+      received()
+      await readChatStream(response, onEvent, received)
+    } finally {
+      clearTimeout(timer)
+    }
   },
   selectOffer: (id, offer, signal) => jsonRequest(`/api/v1/sessions/${encodeURIComponent(id)}/selection`, isOffer, {
     method: 'POST', signal, body: JSON.stringify({ offer_id: offer.offer_id, catalog_version: offer.catalog_version }),

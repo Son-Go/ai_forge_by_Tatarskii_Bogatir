@@ -74,7 +74,16 @@ export class ChatController {
         if (pending?.sessionId === id) {
           if (pending.turnId && session.last_turn?.turn_id === pending.turnId && session.last_turn.status === 'complete') this.storage.setPending(null)
           else if (pending.turnId && session.last_turn?.turn_id === pending.turnId && session.last_turn.status === 'failed') {
-            issue ??= { message: 'Ответ был прерван. Сохранённая история восстановлена.', action: pending.retryable ? 'retry' : undefined }
+            const timedOut = session.last_turn.error_code === 'TURN_TIMEOUT'
+            if (timedOut && pending.retryable === undefined) {
+              pending.retryable = true
+              this.storage.setPending(pending)
+            }
+            issue ??= {
+              message: timedOut ? 'Истекло время ожидания модели. Можно повторить запрос.'
+                : 'Ответ был прерван. Сохранённая история восстановлена.',
+              action: pending.retryable ? 'retry' : undefined,
+            }
           } else issue ??= { message: 'Доставка последнего сообщения не подтверждена. Можно безопасно повторить отправку с прежним идентификатором.', action: 'resend' }
         } else if (session.last_turn?.status === 'failed') issue ??= { message: 'Предыдущий ответ был прерван. История восстановлена; можно продолжить диалог.' }
         this.patch({ type: 'patch', value: { issue } })

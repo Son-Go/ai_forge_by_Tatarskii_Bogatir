@@ -2,7 +2,9 @@ import { createParser } from 'eventsource-parser'
 import { parseEvent } from './guards'
 import type { ChatEvent } from './types'
 
-export async function readChatStream(response: Response, onEvent: (event: ChatEvent) => void): Promise<void> {
+export async function readChatStream(
+  response: Response, onEvent: (event: ChatEvent) => void, onBytes?: () => void,
+): Promise<void> {
   if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') || !response.body) {
     throw new Error('Сервис не открыл поток ответа')
   }
@@ -43,6 +45,7 @@ export async function readChatStream(response: Response, onEvent: (event: ChatEv
     while (!terminal) {
       const { value, done } = await reader.read()
       if (done) { parser.feed(decoder.decode()); break }
+      onBytes?.()
       parser.feed(decoder.decode(value, { stream: true }))
     }
     if (!terminal) throw new Error('Соединение прервано до завершения ответа')

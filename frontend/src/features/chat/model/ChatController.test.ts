@@ -42,6 +42,24 @@ describe('chat lifecycle through HTTP/SSE mocks', () => {
     expect(chat.getSnapshot().session?.messages.at(-1)?.status).toBe('complete')
     expect(chat.getSnapshot().streamText).toBe('')
   })
+  it('offers retry when a disconnected stream resolves to a saved timeout', async () => {
+    const chat = controller(); await chat.start()
+    const session = chat.getSnapshot().session!
+    const turnId = crypto.randomUUID()
+    vi.spyOn(chatApi, 'getSession').mockResolvedValueOnce({
+      ...session, last_turn: { turn_id: turnId, status: 'failed', error_code: 'TURN_TIMEOUT' },
+    })
+    vi.spyOn(chatApi, 'sendMessage').mockImplementationOnce(async (_id, input, onEvent) => {
+      onEvent({ type: 'accepted', data: {
+        turn_id: turnId, client_message_id: input.client_message_id,
+        user_message_id: crypto.randomUUID(), request_id: crypto.randomUUID(),
+      } })
+      throw new Error('stream interrupted')
+    })
+    await chat.send('Синтетическая проверка')
+    expect(chat.getSnapshot().issue?.action).toBe('retry')
+    expect(chat.getSnapshot().issue?.message).toContain('Истекло время ожидания модели')
+  })
   it('preserves a partial answer when retrying after a saved error', async () => {
     const chat = controller(); await chat.start(); await chat.send('Ошибка после блока')
     expect(chat.getSnapshot().session?.messages.at(-1)?.status).toBe('partial')
