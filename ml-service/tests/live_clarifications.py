@@ -42,6 +42,12 @@ INTERPRET_CASES = [
         PRICE_HISTORY,
         {"price_objection", "payment_deferral"},
     ),
+    (
+        "combined-30-days",
+        "Мне дорого, можно рассчитаться через 30 дней?",
+        PRICE_HISTORY,
+        {"price_objection", "payment_deferral"},
+    ),
 ]
 
 COMPOSE_CASES = [
@@ -77,7 +83,10 @@ async def evaluate() -> int:
             return 1
 
         cold_deadline_ms = min(settings.model_deadline_limit_ms, 300_000)
-        print(f"Running synthetic cases in {settings.runpod_request_mode} mode")
+        print(
+            f"Running synthetic cases: model={settings.runpod_model_version}, "
+            f"mode={settings.runpod_request_mode}, format={settings.runpod_response_format}"
+        )
         for index, (label, utterance, history, expected) in enumerate(INTERPRET_CASES):
             response = await client.post(
                 "/internal/v1/interpret",
@@ -100,7 +109,11 @@ async def evaluate() -> int:
             actual = {signal["kind"] for signal in signals}
             passed = actual == expected and all(s["evidence"] in utterance for s in signals)
             status = "PASS" if passed else "FAIL"
-            print(f"{status} {label}: {sorted(actual)}; expected {sorted(expected)}")
+            prompt_version = response.headers["X-Prompt-Version"]
+            print(
+                f"{status} {label} ({prompt_version}): "
+                f"{sorted(actual)}; expected {sorted(expected)}"
+            )
             failures += not passed
 
         for label, fact, expected in COMPOSE_CASES:
@@ -118,14 +131,16 @@ async def evaluate() -> int:
                 print(f"FAIL {label}: HTTP {response.status_code} {response.json().get('code')}")
                 return 1
             blocks = []
-            completed = False
+            completion = None
             for frame in response.text.split("\n\n"):
                 if frame.startswith("event: block\n"):
                     blocks.append(json.loads(frame.splitlines()[1].removeprefix("data: ")))
-                completed |= frame.startswith("event: complete\n")
+                if frame.startswith("event: complete\n"):
+                    completion = json.loads(frame.splitlines()[1].removeprefix("data: "))
             text = " ".join(block["text"] for block in blocks)
-            passed = completed and all(value in text for value in expected)
-            print(f"{'PASS' if passed else 'FAIL'} compose-{label}")
+            passed = completion is not None and all(value in text for value in expected)
+            prompt_version = completion["prompt_version"] if completion else "incomplete"
+            print(f"{'PASS' if passed else 'FAIL'} compose-{label} ({prompt_version})")
             failures += not passed
 
     total = len(INTERPRET_CASES) + len(COMPOSE_CASES)

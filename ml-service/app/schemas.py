@@ -111,7 +111,11 @@ SetOperation = SetText | SetInteger | SetLicenseKind | SetBudget | SetDomesticRe
 
 class IntentSignal(ModelOutput):
     kind: Literal[
-        "key_delivery", "key_activation", "refund", "instruction_failed", "price_objection",
+        "key_delivery",
+        "key_activation",
+        "refund",
+        "instruction_failed",
+        "price_objection",
         "payment_deferral",
     ]
     evidence: Evidence

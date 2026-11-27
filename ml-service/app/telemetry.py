@@ -20,7 +20,9 @@ tokens = Counter(
     "ml_runpod_tokens", "Tokens reported by RunPod", ("stage", "direction"), registry=registry
 )
 calls = Counter(
-    "ml_runpod_calls", "RunPod calls by usage availability", ("stage", "usage_status"),
+    "ml_runpod_calls",
+    "RunPod calls by usage availability",
+    ("stage", "usage_status"),
     registry=registry,
 )
 for stage in ("interpret", "compose", "faq_review"):
