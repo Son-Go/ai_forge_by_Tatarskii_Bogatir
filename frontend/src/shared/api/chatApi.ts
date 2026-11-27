@@ -19,7 +19,7 @@ export const chatApi: ChatApi = {
   getSession: (id, signal) => jsonRequest(`/api/v1/sessions/${encodeURIComponent(id)}`, isSession, { signal }),
   async sendMessage(id, input, onEvent, signal) {
     const response = await requireOk(await fetch(new URL(`/api/v1/sessions/${encodeURIComponent(id)}/messages`, window.location.origin), {
-      method: 'POST', credentials: 'same-origin', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+      method: 'POST', credentials: 'same-origin', signal: AbortSignal.any([signal, AbortSignal.timeout(180_000)]),
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify(input),
     }))
     await readChatStream(response, onEvent)
