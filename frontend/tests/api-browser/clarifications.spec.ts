@@ -155,3 +155,112 @@ test('manager reads the two new reasons, instruction history and confirmed comme
   await expect(page.locator('.timeline-event')).toHaveCount(0)
   await screenshotThemes(page, info.outputPath.bind(info), 'manager-sales-context')
 })
+
+// These are frontend contract tests, not Java routing tests. Only the simulated
+// Java reply supplies coupon outcomes, money and handoff decisions.
+async function salesConversation(page: Page, respond: (text: string, index: number) => {
+  text: string; terms?: Session['price_terms']; handoff?: Handoff
+}, handoffConfirmation?: Promise<void>) {
+  const selected: Offer = { ...offer, price: { amount: '100', currency: 'RUB' } }
+  const session: Session = { session_id: sessionId, selected_offer: selected, quotes_enabled: false,
+    messages: [message('assistant', 'Выбрана тестовая позиция.', { cards: [selected] })], last_turn: null }
+  const inputs: string[] = []
+  let handoff: Handoff | null = null
+  let handoffReadsAfterSend = 0
+  await page.route('**/api/v1/sessions**', async (route) => {
+    const request = route.request(), path = new URL(request.url()).pathname
+    if (path.endsWith('/handoff')) {
+      if (inputs.length) { handoffReadsAfterSend++; await handoffConfirmation }
+      await route.fulfill({ json: { handoff } }); return
+    }
+    if (path.endsWith('/messages')) {
+      const input = request.postDataJSON() as { text: string; client_message_id: string }
+      expect(Object.keys(input).sort()).toEqual(['client_message_id', 'text'])
+      inputs.push(input.text)
+      const response = respond(input.text, inputs.length)
+      const user = message('user', input.text), reply = message('assistant', response.text)
+      const turnId = crypto.randomUUID()
+      session.messages.push(user, reply)
+      session.last_turn = { turn_id: turnId, status: 'complete', outcome: 'answer' }
+      if (response.terms) session.price_terms = response.terms
+      handoff = response.handoff ?? null
+      const body = `event: accepted\ndata: ${JSON.stringify({ turn_id: turnId, client_message_id: input.client_message_id, user_message_id: user.id, request_id: 'synthetic-sales' })}\n\nevent: done\ndata: ${JSON.stringify({ turn_id: turnId, outcome: 'answer', message: reply })}\n\n`
+      await route.fulfill({ contentType: 'text/event-stream', body }); return
+    }
+    expect(path).toBe(request.method() === 'POST' ? '/api/v1/sessions' : `/api/v1/sessions/${sessionId}`)
+    await route.fulfill({ status: request.method() === 'POST' ? 201 : 200, json: request.method() === 'POST' ? { session_id: sessionId } : session })
+  })
+  await page.goto('/')
+  const input = page.getByRole('textbox', { name: 'Ваше сообщение' })
+  await expect(input).toBeEnabled()
+  async function send(text: string) {
+    await input.fill(text)
+    await page.getByRole('button', { name: 'Отправить', exact: true }).click()
+    await expect(page.getByRole('article', { name: 'Вы', exact: true }).last()).toContainText(text)
+    await expect(input).toBeEnabled()
+  }
+  return { inputs, send, handoffReadsAfterSend: () => handoffReadsAfterSend }
+}
+
+test('short Нет after the coupon question shows Java price terms and restores them without client-side coupon rules', async ({ page }) => {
+  const question = 'Есть ли у вас купон или промокод?'
+  const scenario = await salesConversation(page, (text, index) => {
+    expect(text).toBe(index === 1 ? 'Мне дорого' : 'Нет')
+    return index === 1 ? { text: question } : {
+      text: 'Сервер подтвердил скидку и условия выбранной позиции.',
+      terms: { base_amount: '100', discount_percent: '5', final_amount: '95', currency: 'RUB' },
+    }
+  })
+  const terms = page.getByRole('region', { name: 'Условия предложения' })
+  await scenario.send('Мне дорого')
+  await expect(page.getByText(question, { exact: true })).toBeVisible()
+  await expect(terms).toHaveCount(0)
+  await scenario.send('Нет')
+  await expect(terms).toContainText('5%')
+  await expect(terms.locator('div', { has: page.getByText('Базовая цена', { exact: true }) })).toContainText('100')
+  await expect(terms.locator('div', { has: page.getByText('Итого за единицу', { exact: true }) })).toContainText('95')
+  await expect.poll(scenario.handoffReadsAfterSend).toBeGreaterThanOrEqual(2)
+  await expect(page.getByRole('status', { name: 'Автоматическая передача обращения' })).toHaveCount(0)
+  await page.reload()
+  await expect(terms).toContainText('5%')
+  await expect(terms).toContainText('95')
+  expect(scenario.inputs).toEqual(['Мне дорого', 'Нет'])
+})
+
+test('price objection and payment in 30 days show the Java handoff in the same turn without proposing a local discount', async ({ page }) => {
+  let confirm!: () => void
+  const confirmed = new Promise<void>((resolve) => { confirm = resolve })
+  const text = 'Мне дорого, можно рассчитаться через 30 дней?'
+  const scenario = await salesConversation(page, (input) => {
+    expect(input).toBe(text)
+    return { text: 'Передаю просьбу об отсрочке специалисту.', handoff: { handoff_id: caseId, reason: 'payment_deferral', status: 'queued', created_at: at } }
+  }, confirmed)
+  await scenario.send(text)
+  await expect.poll(scenario.handoffReadsAfterSend).toBeGreaterThan(0)
+  const notice = page.getByRole('status', { name: 'Автоматическая передача обращения' })
+  await expect(notice).toHaveCount(0)
+  confirm()
+  await expect(notice).toContainText('Ожидаем специалиста')
+  await expect(notice).toContainText(caseId)
+  await expect(page.getByRole('region', { name: 'Условия предложения' })).toHaveCount(0)
+  expect(scenario.inputs).toEqual([text])
+  await page.reload()
+  await expect(notice).toContainText('Ожидаем специалиста')
+  expect(scenario.inputs).toHaveLength(1)
+})
+
+test('Отсрочка нам не нужна remains an ordinary message when Java returns no handoff', async ({ page }) => {
+  const text = 'Отсрочка нам не нужна'
+  const scenario = await salesConversation(page, (input) => {
+    expect(input).toBe(text)
+    return { text: 'Продолжим обсуждение выбранного предложения.' }
+  })
+  await scenario.send(text)
+  await expect(page.getByText('Продолжим обсуждение выбранного предложения.', { exact: true })).toBeVisible()
+  await expect.poll(scenario.handoffReadsAfterSend).toBeGreaterThan(0)
+  await expect(page.getByRole('status', { name: 'Автоматическая передача обращения' })).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Условия предложения' })).toHaveCount(0)
+  await page.reload()
+  await expect(page.getByRole('status', { name: 'Автоматическая передача обращения' })).toHaveCount(0)
+  expect(scenario.inputs).toEqual([text])
+})

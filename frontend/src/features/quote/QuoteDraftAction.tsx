@@ -57,8 +57,8 @@ export function QuoteDraftAction({ sessionId, demo, onRefresh, onOfferChanged }:
   async function downloadInvoice(quoteId: string, signal: AbortSignal) {
     const pdf = await requestInvoiceDraft(sessionId, quoteId, signal)
     if (signal.aborted) return
-    downloadDraft(pdf, demo ? 'DEMO-invoice.pdf' : 'invoice.pdf')
-    setNotice('Скачивание счёта начато.')
+    downloadDraft(pdf, demo ? 'DEMO-invoice-for-review.pdf' : 'invoice-for-review.pdf')
+    setNotice('Скачивание счёта для согласования начато.')
   }
   return <section className="quote-draft" aria-label="Коммерческое предложение">
     <button type="button" className="quiet-action" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls={formId} disabled={busy}><Icon name="file" />Сформировать КП</button>
@@ -74,15 +74,16 @@ export function QuoteDraftAction({ sessionId, demo, onRefresh, onOfferChanged }:
     {busy && <p className="document-status" role="status">Обрабатываем запрос…</p>}
     {!busy && notice && <p className="document-status" role="status">{notice}</p>}
     {quote && <div className="quote-approval">
+      <p className="muted">Счёт для согласования. Оплата по этому документу не предусмотрена.</p>
       {quote.approved
         ? <button type="button" className="accent-action" disabled={busy} onClick={() => void run((signal) => downloadInvoice(quote.id, signal))}>
-          <Icon name="download" />Скачать счёт</button>
+          <Icon name="download" />Скачать счёт для согласования</button>
         : <button type="button" className="quiet-action" disabled={busy} onClick={() => void run(async (signal) => {
           await approveQuoteDraft(sessionId, quote.id, signal)
           if (signal.aborted) return
           setQuote({ ...quote, approved: true })
           await downloadInvoice(quote.id, signal)
-        })}>Одобрить КП и получить счёт</button>}
+        })}>Одобрить КП и получить счёт для согласования</button>}
     </div>}
     {error && <div className="document-error" role="alert"><p>{error}</p><button type="button" onClick={onRefresh}>Обновить состояние</button></div>}
   </section>

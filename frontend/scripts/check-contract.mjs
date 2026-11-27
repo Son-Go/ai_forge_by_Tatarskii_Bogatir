@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises'
 import openapiTS, { astToString } from 'openapi-typescript'
-const declarations = (text) => text.slice(text.indexOf('export interface paths'))
+const declarations = (text) => {
+  const normalized = text.replace(/\r\n?/g, '\n')
+  return normalized.slice(normalized.indexOf('export interface paths'))
+}
 for (const [name, output] of [['public', 'schema'], ['manager', 'manager-schema']]) {
   const generated = astToString(await openapiTS(new URL(`../contracts/${name}.openapi.yaml`, import.meta.url)))
   const current = await readFile(new URL(`../src/shared/api/${output}.d.ts`, import.meta.url), 'utf8')
