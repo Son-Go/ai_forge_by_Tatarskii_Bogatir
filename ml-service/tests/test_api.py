@@ -371,8 +371,32 @@ async def test_interpret_uses_runpod_and_returns_release_metadata(settings, stru
     async with client_for(settings, handler) as client:
         response = await client.post("/internal/v1/interpret", json=INTERPRET, headers=AUTH)
     assert response.status_code == 200
-    assert response.headers["X-Prompt-Version"] == "interpret-2"
-    assert response.json() == RESULT | {"model_version": "release-a"}
+    assert response.headers["X-Prompt-Version"] == "interpret-3"
+    assert response.json() == RESULT | {"model_version": "release-a", "signals": []}
+
+
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("Мне дорого", "price_objection"),
+        ("Для нас эта цена слишком высокая", "price_objection"),
+        ("Хочу отсрочку", "payment_deferral"),
+        ("Можно заплатить после поставки?", "payment_deferral"),
+        ("Сколько стоит?", None),
+        ("Какие способы оплаты?", None),
+    ],
+)
+async def test_interpret_signals_require_current_text_evidence(settings, text, kind):
+    expected = [{"kind": kind, "evidence": text}] if kind else []
+    upstream = RESULT | {"updates": [], "signals": [
+        *expected, {"kind": "key_delivery", "evidence": "Ключ не пришёл"},
+    ]}
+    async with client_for(settings, lambda _: completion(upstream)) as client:
+        response = await client.post(
+            "/internal/v1/interpret", json=INTERPRET | {"text": text}, headers=AUTH
+        )
+    assert response.status_code == 200
+    assert response.json()["signals"] == expected
 
 
 async def test_interpret_accepts_clear_quote_and_returns_only_op_and_field(settings):

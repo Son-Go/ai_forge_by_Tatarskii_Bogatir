@@ -202,6 +202,12 @@ export interface components {
             selected_offer: components["schemas"]["OfferCard"] | null;
             last_turn: components["schemas"]["Turn"] | null;
             quotes_enabled: boolean;
+            price_terms?: components["schemas"]["PriceTerms"];
+            /**
+             * @description Тема выданной инструкции, по которой можно сообщить, что она не помогла.
+             * @enum {unknown}
+             */
+            support_topic?: "key_delivery" | "key_activation" | "refund";
         };
         Turn: {
             turn_id: components["schemas"]["Uuid"];
@@ -231,8 +237,17 @@ export interface components {
             price: components["schemas"]["Price"] | null;
             /** @enum {unknown} */
             availability: "available" | "unavailable" | "unknown";
+            /** @description Сервер разрешает выбрать позицию. Позиция со статусом unavailable доступна для выбора при подтверждённой цене. */
+            selectable?: boolean;
             attributes: Record<string, never>;
             source_ids: string[];
+        };
+        PriceTerms: {
+            base_amount: string;
+            /** @description Подтверждённый процент скидки от 0 до 5 */
+            discount_percent: string;
+            final_amount: string;
+            currency: string;
         };
         Price: {
             amount: string;

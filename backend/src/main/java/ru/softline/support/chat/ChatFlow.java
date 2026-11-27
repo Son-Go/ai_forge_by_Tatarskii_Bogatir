@@ -152,12 +152,13 @@ class ChatFlow {
         }
         Map<String, Object> old = store.requirements(turn);
         String activeHandoff = store.activeHandoffReason(turn.sessionId());
+        String supportTopic = store.supportTopic(turn.sessionId());
         Reply direct = activeHandoff == null ? planner.explicitHandoff(turn.userText())
                 : Reply.handoff(activeHandoff, "Сообщение добавлено к обращению. Менеджер увидит его в этом диалоге.");
+        if (direct == null) direct = planner.commercialSupport(turn.userText(), supportTopic, null);
+        if (direct == null) direct = store.pricingReply(turn, null);
         if (direct != null) {
-            Done answer = store.complete(turn, direct, old, false, null, null);
-            send(emitter, "done", answer);
-            timing.outcome = answer.outcome();
+            finishDirect(turn, emitter, timing, old, direct);
             return;
         }
         send(emitter, "status", Map.of("stage", "interpreting"));
@@ -177,6 +178,12 @@ class ChatFlow {
             timing.errorCode = code;
             recordFailure(turn, code);
             sendFailure(emitter, turn, code, true);
+            return;
+        }
+        Reply support = planner.commercialSupport(turn.userText(), supportTopic, interpretation);
+        if (support == null) support = store.pricingReply(turn, interpretation);
+        if (support != null) {
+            finishDirect(turn, emitter, timing, old, support);
             return;
         }
         long searchStarted = System.nanoTime();
@@ -219,6 +226,14 @@ class ChatFlow {
         Map<String, Object> saved = "product_question".equals(interpretation.intent()) ? old : next;
         Done answer = store.complete(turn, reply, saved, !old.equals(saved), validVersion(interpretation.modelVersion()),
                 validVersion(promptVersion));
+        send(emitter, "done", answer);
+        timing.outcome = answer.outcome();
+    }
+
+    private void finishDirect(Turn turn, SseEmitter emitter, TurnTiming timing, Map<String, Object> requirements,
+                              Reply reply) throws IOException {
+        if (reply.handoffReason() == null) append(turn, emitter, reply.facts().getFirst().text(), false, timing);
+        Done answer = store.complete(turn, reply, requirements, false, null, null);
         send(emitter, "done", answer);
         timing.outcome = answer.outcome();
     }

@@ -45,7 +45,7 @@ test('themes preserve geometry, preference, official branding and client state',
   await input.fill('Подобрать решение на 50 пользователей')
   await page.getByRole('button', { name: 'Отправить', exact: true }).click()
   await page.getByRole('button', { name: 'Выбрать', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Подготовить КП' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Сформировать КП' })).toBeVisible()
   await page.locator('.conversation').evaluate((el) => { el.scrollTop = el.scrollHeight })
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
   const chat = await geometry(page, ['.main', '.message-user .message-content', '.offer-card', '.sources', '.composer'])

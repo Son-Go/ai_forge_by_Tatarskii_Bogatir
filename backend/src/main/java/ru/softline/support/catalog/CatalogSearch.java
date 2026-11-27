@@ -48,7 +48,7 @@ public class CatalogSearch {
     public List<Offer> find(UUID version, String query, boolean recommend) {
         if (query == null || query.isBlank()) return List.of();
         return db.sql(OFFER_COLUMNS + """
-            WHERE o.import_id = :version AND (NOT :recommend OR o.available IS TRUE)
+            WHERE o.import_id = :version AND (NOT :recommend OR o.available IS TRUE OR (o.available IS FALSE AND o.price > 0 AND o.currency IS NOT NULL))
                 AND (o.offer_id = :query OR lower(o.vendor_code) = lower(:query)
                     OR lower(o.name) LIKE lower(:contains) ESCAPE '!'
                     OR lower(o.name) % lower(:query)
@@ -93,6 +93,19 @@ public class CatalogSearch {
                 rs.getString("source_url"), rs.getObject("fetched_at", OffsetDateTime.class).toInstant());
     }
 
+    public Optional<Knowledge> supportGuide(String topic) {
+        return db.sql("""
+            SELECT c.chunk_id, c.body, d.title, d.source_url, d.fetched_at
+            FROM knowledge_chunks c JOIN knowledge_documents d USING (document_id)
+            WHERE c.section = ? ORDER BY d.fetched_at DESC, c.chunk_id LIMIT 1
+            """).param("after_sale:" + topic).query(CatalogSearch::knowledgeRow).optional();
+    }
+
+    public static boolean canSelect(JsonNode card) {
+        String status = card.path("availability").asText();
+        return "available".equals(status) || "unavailable".equals(status) && card.path("price").isObject();
+    }
+
     public JsonNode card(Offer offer) {
         ObjectNode card = json.createObjectNode();
         card.put("offer_id", offer.id()).put("catalog_version", offer.version().toString())
@@ -103,6 +116,7 @@ public class CatalogSearch {
         } else {
             card.putNull("price");
         }
+        card.put("selectable", canSelect(card));
         ObjectNode attributes = card.putObject("attributes");
         if (offer.vendorCode() != null) attributes.put("vendor_code", offer.vendorCode());
         if (offer.edition() != null) attributes.put("edition", offer.edition());

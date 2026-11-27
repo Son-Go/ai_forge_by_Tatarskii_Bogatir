@@ -280,6 +280,11 @@ components:
             - $ref: '#/components/schemas/Turn'
             - type: 'null'
         quotes_enabled: { type: boolean }
+        price_terms:
+          $ref: '#/components/schemas/PriceTerms'
+        support_topic:
+          enum: [key_delivery, key_activation, refund]
+          description: Тема выданной инструкции, по которой можно сообщить, что она не помогла.
     Turn:
       type: object
       required: [turn_id, status]
@@ -312,8 +317,19 @@ components:
             - $ref: '#/components/schemas/Price'
             - type: 'null'
         availability: { enum: [available, unavailable, unknown] }
+        selectable:
+          type: boolean
+          description: Сервер разрешает выбрать позицию. Позиция со статусом unavailable доступна для выбора при подтверждённой цене.
         attributes: { type: object }
         source_ids: { type: array, items: { type: string } }
+    PriceTerms:
+      type: object
+      required: [base_amount, discount_percent, final_amount, currency]
+      properties:
+        base_amount: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
+        discount_percent: { type: string, description: Подтверждённый процент скидки от 0 до 5 }
+        final_amount: { type: string, pattern: '^[0-9]+(\.[0-9]+)?$' }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
     Price:
       type: object
       required: [amount, currency]

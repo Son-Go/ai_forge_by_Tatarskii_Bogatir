@@ -3,6 +3,7 @@ package ru.softline.support.chat;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -14,8 +15,20 @@ final class ChatTypes {
     record InvoiceDraftRequest(UUID quoteId) {}
     record QuotePdf(UUID id, boolean invoiceDraftsEnabled, byte[] bytes) {}
     record DocumentDraft(String customerName, String name, String vendorCode, int quantity,
-                         BigDecimal unitPrice, String currency) {
+                         BigDecimal unitPrice, String currency, BigDecimal discountPercent, BigDecimal agreedTotal) {
         BigDecimal total() {
+            if (agreedTotal != null) return agreedTotal;
+            return discountedUnitPrice().multiply(BigDecimal.valueOf(quantity));
+        }
+
+        BigDecimal discountedUnitPrice() {
+            if (agreedTotal != null) return agreedTotal.divide(BigDecimal.valueOf(quantity));
+            if (discountPercent.signum() == 0) return unitPrice;
+            return unitPrice.multiply(BigDecimal.ONE.subtract(discountPercent.movePointLeft(2)))
+                    .setScale(Math.max(2, unitPrice.scale()), RoundingMode.CEILING);
+        }
+
+        BigDecimal originalTotal() {
             return unitPrice.multiply(BigDecimal.valueOf(quantity));
         }
     }
@@ -41,7 +54,9 @@ final class ChatTypes {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     record PublicTurn(UUID turnId, String status, String outcome, String errorCode) {}
     record Session(UUID sessionId, List<Message> messages, JsonNode selectedOffer, PublicTurn lastTurn,
-                   boolean quotesEnabled) {}
+                   boolean quotesEnabled,
+                   @JsonInclude(JsonInclude.Include.NON_NULL) String supportTopic,
+                   @JsonInclude(JsonInclude.Include.NON_NULL) PriceTerms priceTerms) {}
     record Turn(UUID turnId, UUID sessionId, UUID clientMessageId, String requestId, UUID userMessageId,
                 UUID catalogVersion, String status, String outcome, Instant deadline, UUID retryOfTurnId,
                 String code, boolean retryable, String userText) {
@@ -53,13 +68,16 @@ final class ChatTypes {
     record Done(UUID turnId, String outcome, Message message) {}
     record Handoff(UUID handoffId, String reason, String status, Instant createdAt) {}
     record QueueItem(UUID handoffId, UUID sessionId, String reason, String status, Instant createdAt) {}
-    record AssignedHandoff(QueueItem handoff, List<Message> messages) {}
+    record AssignedHandoff(QueueItem handoff, List<Message> messages, JsonNode salesContext) {}
     record HandoffStatus(Handoff handoff) {}
     record ManagerMessage(UUID messageId, String text) {}
+    record PriceTerms(String baseAmount, String discountPercent, String finalAmount, String currency) {}
+    record PricingState(boolean objection, String coupon, BigDecimal percent) {}
     record Fact(String id, String text) {}
-    record Reply(String outcome, List<Fact> facts, List<JsonNode> cards, List<JsonNode> sources, String handoffReason) {
+    record Reply(String outcome, List<Fact> facts, List<JsonNode> cards, List<JsonNode> sources,
+                 String handoffReason, String supportTopic, PricingState pricing) {
         Reply(String outcome, List<Fact> facts, List<JsonNode> cards, List<JsonNode> sources) {
-            this(outcome, facts, cards, sources, null);
+            this(outcome, facts, cards, sources, null, null, null);
         }
 
         static Reply text(String outcome, String text) {
@@ -67,7 +85,7 @@ final class ChatTypes {
         }
 
         static Reply handoff(String reason, String text) {
-            return new Reply("insufficient_data", List.of(new Fact("f1", text)), List.of(), List.of(), reason);
+            return new Reply("insufficient_data", List.of(new Fact("f1", text)), List.of(), List.of(), reason, null, null);
         }
     }
 

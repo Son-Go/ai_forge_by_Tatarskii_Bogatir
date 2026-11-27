@@ -1,4 +1,4 @@
-INTERPRET_VERSION = "interpret-2"
+INTERPRET_VERSION = "interpret-3"
 COMPOSE_VERSION = "compose-1"
 FAQ_REVIEW_VERSION = "faq-review-1"
 
@@ -21,7 +21,17 @@ budget_rub — десятичная строка, domestic_required — boolean.
 deployment, platform, budget_rub, domestic_required, use_case.
 В clarification_candidates укажи только разрешённые поля, по которым стоит спросить
 уточнение. Списки могут быть пустыми. Верни один JSON с ключами
-intent, product_query, updates, clarification_candidates, без Markdown. /no_think"""
+intent, product_query, updates, clarification_candidates, signals, без Markdown.
+В signals укажи только явно выраженные намерения из текущей реплики.
+Каждый элемент содержит kind и evidence (дословный фрагмент текущей реплики).
+key_delivery — покупатель ждёт ключ, который не пришёл;
+key_activation — полученный ключ не работает или не активируется;
+refund — покупатель просит вернуть заказ или деньги;
+instruction_failed — покупатель сообщает, что предыдущая инструкция не помогла;
+price_objection — покупатель прямо говорит, что эта цена слишком высока;
+payment_deferral — покупатель явно просит заплатить позже или получить отсрочку.
+«Сколько стоит?» не price_objection. «Какие способы оплаты?» не payment_deferral.
+Если явных сигналов нет, верни пустой список signals. /no_think"""
 
 COMPOSE = """Ты формулируешь пояснение для агента поддержки Softline.
 Вход — JSON с outcome, language и подтверждёнными facts, у каждого факта есть id и text.

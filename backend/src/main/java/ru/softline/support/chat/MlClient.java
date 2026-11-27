@@ -264,7 +264,8 @@ class MlClient {
     }
 
     record Interpretation(String intent, String productQuery, List<Update> updates,
-                          List<String> clarificationCandidates, String modelVersion) {}
+                          List<String> clarificationCandidates, String modelVersion, List<Signal> signals) {}
+    record Signal(String kind, String evidence) {}
     record Update(String op, String field, JsonNode value, String evidence) {}
     record FaqExcerpt(UUID id, String text) {}
     record FaqReview(String verdict, String reasonCode, String question, String answer, List<UUID> sourceIds,

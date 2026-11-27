@@ -37,7 +37,7 @@ final class InvoicePdf {
         if (!draft.vendorCode().isBlank()) product += " / Артикул: " + draft.vendorCode();
         String currency = draft.currency();
         List<List<String>> cells = new ArrayList<>();
-        String[] values = {product, Integer.toString(draft.quantity()), amount(draft.unitPrice()), amount(draft.total())};
+        String[] values = {product, Integer.toString(draft.quantity()), amount(draft.discountedUnitPrice()), amount(draft.total())};
         for (int i = 0; i < values.length; i++) {
             cells.add(DocumentDraftPdf.wrap(font, values[i], TABLE_FONT, COLUMNS[i] - 16));
         }
@@ -48,10 +48,16 @@ final class InvoicePdf {
             document.addPage(page);
             try (PDPageContentStream stream = new PDPageContentStream(document, page)) {
                 float tableTop = writeHeader(stream, font, logo, draft.customerName(), quoteId, date);
-                int count = Math.min((int) ((tableTop - TABLE_BOTTOM_SPACE) / LINE_HEIGHT), lines - offset);
+                float reserve = TABLE_BOTTOM_SPACE + (draft.discountPercent().signum() > 0 ? 16 : 0);
+                int count = Math.min((int) ((tableTop - reserve) / LINE_HEIGHT), lines - offset);
                 float bottom = writeItem(stream, font, cells, currency, tableTop, offset, count);
                 offset += count;
                 if (offset == lines) {
+                    if (draft.discountPercent().signum() > 0) {
+                        rightText(stream, font, "Базовая сумма: " + amount(draft.originalTotal()) + " "
+                                + currency + " · Скидка: " + amount(draft.discountPercent()) + "%", 10, RIGHT, bottom - 15, INK);
+                        bottom -= 18;
+                    }
                     writeTotal(stream, font, amount(draft.total()) + " " + currency, bottom - 14);
                 }
             }

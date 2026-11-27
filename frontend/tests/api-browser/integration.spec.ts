@@ -191,7 +191,7 @@ test('quote sends schema fields, keeps the form after errors and approves the do
     await route.fulfill({ json: { session_id: sessionId, last_turn: null, quotes_enabled: true, selected_offer: offer, messages: [{ ...message('Тестовая рекомендация'), cards: [offer] }] } })
   })
   await page.goto('/')
-  await page.getByRole('button', { name: 'Подготовить КП', exact: true }).click()
+  await page.getByRole('button', { name: 'Сформировать КП', exact: true }).click()
   const customer = page.getByRole('textbox', { name: 'Наименование заказчика' })
   await expect(customer).toHaveAttribute('maxlength', '160')
   await customer.fill('Синтетический заказчик')
@@ -206,21 +206,20 @@ test('quote sends schema fields, keeps the form after errors and approves the do
   expect((await download).suggestedFilename()).toBe('quote.pdf')
   const invoice = page.getByRole('button', { name: 'Скачать счёт' })
   await expect(invoice).toHaveCount(0)
-  await page.getByRole('button', { name: 'Одобрить КП' }).click()
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const invoiceDownload = page.waitForEvent('download')
-    await invoice.click()
-    expect((await invoiceDownload).suggestedFilename()).toBe('invoice.pdf')
-  }
+  const issuedDownload = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт' }).click()
+  expect((await issuedDownload).suggestedFilename()).toBe('invoice.pdf')
+  const repeatedDownload = page.waitForEvent('download')
+  await invoice.click()
+  expect((await repeatedDownload).suggestedFilename()).toBe('invoice.pdf')
   expect(invoiceRequests).toEqual([caseId, caseId])
   quoteId = crypto.randomUUID()
   approval = false
   const newDownload = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Скачать КП', exact: true }).click()
   await newDownload
-  await page.getByRole('button', { name: 'Одобрить КП' }).click()
   offerChanged = true
-  await invoice.click()
+  await page.getByRole('button', { name: 'Одобрить КП и получить счёт' }).click()
   await expect(page.getByRole('heading', { name: 'Обновлённое предложение' })).toBeVisible()
   await expect(page.getByText('Лицензия с обновлённой ценой', { exact: true })).toBeVisible()
   await expect(invoice).toHaveCount(0)

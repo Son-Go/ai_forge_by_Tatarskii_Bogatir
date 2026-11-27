@@ -5,6 +5,8 @@ import type { Message, Offer, Source } from '../../shared/api/types'
 export const handoffReasons = {
   document_review: 'Проверка документов',
   off_catalog_order: 'Заказ вне каталога',
+  instruction_failed: 'Инструкция не помогла',
+  payment_deferral: 'Отсрочка оплаты',
   price: 'Уточнение цены',
   documents: 'Проверка документов',
   supply: 'Поставка вне каталога',

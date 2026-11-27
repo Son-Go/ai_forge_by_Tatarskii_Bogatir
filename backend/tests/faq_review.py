@@ -88,7 +88,8 @@ def exercise(origin, mock, sql):
         except HTTPError as error:
             response = error
         with response:
-            content = response.read().decode()
+            raw = response.read()
+            content = raw if response.headers.get_content_type() == "application/pdf" else raw.decode()
             assert response.code == expected, (path, response.code, content[:300])
             body = json.loads(content) if response.headers.get_content_type() == "application/json" else content
             return body, response.headers
@@ -215,6 +216,61 @@ def exercise(origin, mock, sql):
     assert ask(client, cookie, TIMEOUT_QUESTION)["text"] != TIMEOUT_ANSWER
     print("PASS: FAQ approval, grounding, history, conservative matching, retries, access, and removal")
 
+    for question, topic in (("Ключ не пришёл", "key_delivery"),
+                            ("Ключ не активируется", "key_activation"), ("Хочу возврат", "refund")):
+        path, cookie = new_session()
+        instruction = ask(path, cookie, question)
+        assert instruction["sources"][0]["url"].startswith("https://store.softline.ru/")
+        assert call(path, cookie=cookie)[0]["support_topic"] == topic
+        assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+        ask(path, cookie, "Не помогло")
+        handoff = call(path + "/handoff", cookie=cookie)[0]["handoff"]
+        assert handoff["reason"] == "instruction_failed"
+        ask(path, cookie, "Инструкция не сработала")
+        assert call(path + "/handoff", cookie=cookie)[0]["handoff"] == handoff
+        path_manager = "/api/v1/manager/handoffs/" + handoff["handoff_id"]
+        call(path_manager + "/claim", "POST", token=OWNER)
+        assert instruction in call(path_manager, token=OWNER)[0]["messages"]
+
+    path, cookie = new_session()
+    offer = ask(path, cookie, "Fixture")["cards"][0]
+    assert offer["availability"] == "unavailable" and offer["selectable"] and offer["price"]["amount"] == "100"
+    call(path + "/selection", "POST", cookie=cookie, body={
+        "offer_id": offer["offer_id"], "catalog_version": offer["catalog_version"],
+    })
+    assert "100 RUB" in ask(path, cookie, "Сколько стоит? Купона нет.")["text"]
+    assert "price_terms" not in call(path, cookie=cookie)[0]
+    assert "купон" in ask(path, cookie, "Для нас это слишком дорого")["text"].lower()
+    ask(path, cookie, "Купон есть")
+    assert "price_terms" not in call(path, cookie=cookie)[0]
+    assert "95 RUB" in ask(path, cookie, "Купона нет")["text"]
+    assert call(path, cookie=cookie)[0]["price_terms"] == {
+        "base_amount": "100", "discount_percent": "5", "final_amount": "95", "currency": "RUB",
+    }
+    quote, headers = call(path + "/quote-drafts", "POST", cookie=cookie, body={
+        "customer_name": "Synthetic customer", "quantity": 2,
+    })
+    quote_id = headers["X-Quote-Id"]
+    assert call(path + "/invoice-drafts", "POST", cookie=cookie, body={"quote_id": quote_id},
+                expected=409)[0]["code"] == "QUOTE_APPROVAL_REQUIRED"
+    for _ in range(2):
+        call(path + f"/quote-drafts/{quote_id}/approval", "POST", cookie=cookie, expected=204)
+    invoice, _ = call(path + "/invoice-drafts", "POST", cookie=cookie, body={"quote_id": quote_id})
+    assert call(path + "/invoice-drafts", "POST", cookie=cookie, body={"quote_id": quote_id})[0] == invoice
+    for pdf in (quote, invoice):
+        text = subprocess.check_output(["pdftotext", "-", "-"], input=pdf).decode()
+        assert "190" in text and "5%" in text
+    assert call(path + "/handoff", cookie=cookie)[0]["handoff"] is None
+    ask(path, cookie, "Дорого, можно оплатить с отсрочкой?")
+    handoff = call(path + "/handoff", cookie=cookie)[0]["handoff"]
+    assert handoff["reason"] == "payment_deferral"
+    path_manager = "/api/v1/manager/handoffs/" + handoff["handoff_id"]
+    call(path_manager + "/claim", "POST", token=OWNER)
+    sales = call(path_manager, token=OWNER)[0]["sales_context"]
+    assert sales["offer"] == offer and sales["quote"]["quote_id"] == quote_id
+    assert sales["quote"]["approved"] and sales["quote"]["discount_percent"] == "5.00"
+    print("PASS: support guides, handoff context, priced unavailable offer, discount, quote and invoice")
+
 
 def run(args):
     def sql(statement):
@@ -237,7 +293,7 @@ def run(args):
         ).strip()
         feed = Path(temp, "feed.xml")
         feed.write_text("""<yml_catalog date="2026-11-26 12:00"><shop><offers>
-          <offer id="fixture" available="true"><name>Fixture</name><url>https://example.test/product</url>
+          <offer id="fixture" available="false"><name>Fixture</name><url>https://example.test/product</url>
             <price>100</price><currencyId>RUB</currencyId></offer>
           </offers></shop></yml_catalog>""")
         knowledge = Path(temp, "knowledge.json")
@@ -251,7 +307,8 @@ def run(args):
                "CATALOG_FEED_URL": "", "CATALOG_FEED_FILE": str(feed), "CATALOG_KNOWLEDGE_FILE": str(knowledge),
                "MANAGER_ACCESS_TOKENS": f"owner={OWNER},other={OTHER}",
                "ML_BASE_URL": f"http://127.0.0.1:{mock.server_port}", "ML_DATA_REGION": "RU", "ML_SERVICE_TOKEN": TOKEN,
-               "FAQ_REVIEW_ENABLED": "true", "FAQ_REVIEW_TIMEOUT_MS": "1000", "FAQ_REVIEW_POLL_MS": "150"}
+               "FAQ_REVIEW_ENABLED": "true", "FAQ_REVIEW_TIMEOUT_MS": "1000", "FAQ_REVIEW_POLL_MS": "150",
+               "CHAT_QUOTES_ENABLED": "true", "CHAT_INVOICE_DRAFTS_ENABLED": "true", "CHAT_DISCOUNT_PERCENT": "5"}
         log = Path(temp, "backend.log")
         with log.open("w") as out:
             java = subprocess.Popen(["java", "-jar", args.jar], env=env, stdout=out, stderr=out)

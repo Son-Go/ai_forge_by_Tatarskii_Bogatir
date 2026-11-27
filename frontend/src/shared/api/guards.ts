@@ -7,12 +7,16 @@ const list = <T>(v: unknown, guard: (item: unknown) => item is T): v is T[] => A
 const includes = (v: unknown, values: string[]) => typeof v === 'string' && values.includes(v)
 const date = (v: unknown) => typeof v === 'string' && Number.isFinite(Date.parse(v))
 
+export const isPrice = (v: unknown): v is NonNullable<Offer['price']> => object(v) &&
+  typeof v.amount === 'string' && /^[0-9]+(\.[0-9]+)?$/.test(v.amount) &&
+  typeof v.currency === 'string' && /^[A-Z]{3}$/.test(v.currency)
+
 export function isOffer(v: unknown): v is Offer {
   if (!object(v) || !strings(v, ['offer_id', 'catalog_version', 'name', 'product_url'])) return false
   const price = v.price
-  return (price === null || (object(price) && typeof price.amount === 'string' && /^[0-9]+(\.[0-9]+)?$/.test(price.amount)
-    && typeof price.currency === 'string' && /^[A-Z]{3}$/.test(price.currency)))
+  return (price === null || isPrice(price))
     && includes(v.availability, ['available', 'unavailable', 'unknown']) && object(v.attributes)
+    && (v.selectable === undefined || typeof v.selectable === 'boolean')
     && list(v.source_ids, (x): x is string => typeof x === 'string')
 }
 export function isSource(v: unknown): v is Source {
@@ -31,6 +35,12 @@ export function isSession(v: unknown): v is Session {
   const turn = v.last_turn
   return list(v.messages, (m): m is Session['messages'][number] => isMessage(m) && m.status !== undefined)
     && (v.selected_offer === null || isOffer(v.selected_offer))
+    && (v.price_terms === undefined || (object(v.price_terms)
+      && isPrice({ amount: v.price_terms.base_amount, currency: v.price_terms.currency })
+      && isPrice({ amount: v.price_terms.final_amount, currency: v.price_terms.currency })
+      && typeof v.price_terms.discount_percent === 'string' && /^[0-9]+(\.[0-9]+)?$/.test(v.price_terms.discount_percent)
+      && Number(v.price_terms.discount_percent) <= 5))
+    && (v.support_topic === undefined || includes(v.support_topic, ['key_delivery', 'key_activation', 'refund']))
     && (turn === null || (object(turn) && typeof turn.turn_id === 'string'
       && includes(turn.status, ['running', 'complete', 'failed'])))
 }

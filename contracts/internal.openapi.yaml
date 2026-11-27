@@ -209,10 +209,21 @@ components:
               role: { enum: [user, assistant] }
               text: { type: string, maxLength: 4000 }
         requirements: { $ref: '#/components/schemas/Requirements' }
+    IntentSignal:
+      type: object
+      additionalProperties: false
+      required: [kind, evidence]
+      properties:
+        kind: { enum: [key_delivery, key_activation, refund, instruction_failed, price_objection, payment_deferral] }
+        evidence: { type: string, minLength: 1, maxLength: 240, description: Дословный фрагмент текущей реплики }
     InterpretResult:
       type: object
       required: [intent, product_query, updates, clarification_candidates, model_version]
       properties:
+        signals:
+          type: array
+          maxItems: 6
+          items: { $ref: '#/components/schemas/IntentSignal' }
         intent: { enum: [known_product, needs_solution, product_question] }
         product_query:
           type: [string, 'null']

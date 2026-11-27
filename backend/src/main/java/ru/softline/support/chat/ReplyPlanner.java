@@ -61,6 +61,11 @@ class ReplyPlanner {
 
     Reply explicitHandoff(String message) {
         String text = normalize(message);
+        boolean request = text.matches("(?s).*(хочу|хотим|просим|прошу|нужн|можно|дайте|предостав|оформ).+");
+        if (request && !negativeDeferral(text)
+                && (text.contains("отсроч") || text.matches("(?s).*(?:оплатить|заплатить) (?:позже|после поставки).*"))) {
+            return paymentDeferral();
+        }
         boolean documentReview = (text.contains("документ") || text.contains("справк"))
                 && (text.contains("проверь") || text.contains("проверить") || text.contains("проверка документ")
                     || text.contains("проверите") || text.contains("подтвердите") || text.contains("подтвердить")
@@ -75,6 +80,41 @@ class ReplyPlanner {
                 || text.contains("проверьте возможность поставки") || text.contains("уточните возможность поставки")
                 || text.contains("проверьте поставку")) return offCatalog();
         return null;
+    }
+
+    Reply commercialSupport(String message, String activeTopic, MlClient.Interpretation interpretation) {
+        String text = normalize(message);
+        if (!negativeDeferral(text) && signal(interpretation, "payment_deferral", message)) return paymentDeferral();
+        if (activeTopic != null && (text.matches("(?s).*(не помогл|не сработал|не решен|не решилась|все равно не).*")
+                || signal(interpretation, "instruction_failed", message))) {
+            return Reply.handoff("instruction_failed", "Передали обращение менеджеру. Он увидит историю и инструкцию, которую вы уже попробовали.");
+        }
+        String topic = null;
+        if ((text.contains("ключ") || text.contains("лицензи")) && text.matches("(?s).*(не приш|не получ|не поступ).*")
+                || signal(interpretation, "key_delivery", message)) topic = "key_delivery";
+        else if ((text.contains("ключ") || text.contains("лицензи")) && text.matches("(?s).*(не активир|ошибк[аи] активац|не удается активир).*")
+                || signal(interpretation, "key_activation", message)) topic = "key_activation";
+        else if (text.matches("(?s).*(хочу возврат|вернуть (?:товар|деньги|лицензию)|как (?:сделать|оформить) возврат|оформите возврат).*")
+                || signal(interpretation, "refund", message)) topic = "refund";
+        if (topic == null) return null;
+        String selectedTopic = topic;
+        return catalog.supportGuide(topic)
+                .map(guide -> new Reply("answer", List.of(new Fact("f1", guide.text())), List.of(),
+                        List.of(catalog.source(guide)), null, selectedTopic, null)).orElse(null);
+    }
+
+    static boolean signal(MlClient.Interpretation interpretation, String kind, String message) {
+        return interpretation != null && interpretation.signals() != null && interpretation.signals().stream()
+                .anyMatch(signal -> signal != null && kind.equals(signal.kind()) && signal.evidence() != null
+                        && !signal.evidence().isBlank() && message.contains(signal.evidence()));
+    }
+
+    private static boolean negativeDeferral(String text) {
+        return text.matches("(?s).*(?:не (?:нужна|нужен|просим|прошу|хочу|нужно) отсроч|отсрочка не нужна).*");
+    }
+
+    private static Reply paymentDeferral() {
+        return Reply.handoff("payment_deferral", "Передали просьбу об отсрочке оплаты менеджеру. Он ответит в этом диалоге.");
     }
 
     Reply faqAnswer(Turn turn, MlClient.Interpretation interpretation, Map<String, Object> requirements) {
@@ -175,6 +215,8 @@ class ReplyPlanner {
             if (offer.platform() != null) data.add("платформа: " + offer.platform());
             if (offer.licenseKind() != null) data.add("renewal".equals(offer.licenseKind()) ? "продление" : "новая лицензия");
             if (offer.registryNumber() != null) data.add("номер записи в реестре: " + offer.registryNumber());
+            JsonNode price = catalog.card(offer).path("price");
+            if (price.isObject()) data.add("цена по фиду: " + price.path("amount").asText() + " " + price.path("currency").asText());
             String suffix = data.isEmpty() ? "" : " (" + String.join(", ", data) + ")";
             facts.add(new Fact("f" + (facts.size() + 1), offer.name() + suffix + "."));
         }

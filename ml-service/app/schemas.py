@@ -109,10 +109,19 @@ class SetDomesticRequired(SetUpdate):
 SetOperation = SetText | SetInteger | SetLicenseKind | SetBudget | SetDomesticRequired
 
 
+class IntentSignal(ModelOutput):
+    kind: Literal[
+        "key_delivery", "key_activation", "refund", "instruction_failed", "price_objection",
+        "payment_deferral",
+    ]
+    evidence: Evidence
+
+
 class InterpretationFields(ModelOutput):
     intent: Intent
     product_query: str | None
     clarification_candidates: list[RequirementField]
+    signals: list[IntentSignal] = Field(default_factory=list, max_length=6)
 
     @field_validator("clarification_candidates")
     @classmethod

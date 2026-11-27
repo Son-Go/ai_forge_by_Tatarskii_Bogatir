@@ -64,6 +64,11 @@ paths:
                 required: [handoff, messages]
                 properties:
                   handoff: { $ref: '#/components/schemas/QueueItem' }
+                  sales_context:
+                    description: Снимок выбранной позиции и версии КП на момент передачи просьбы об отсрочке.
+                    oneOf:
+                      - $ref: '#/components/schemas/SalesContext'
+                      - type: 'null'
                   messages:
                     type: array
                     items: { $ref: '#/components/schemas/ChatMessage' }
@@ -197,7 +202,7 @@ components:
       required: [handoff_id, reason, status, created_at]
       properties:
         handoff_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
-        reason: { enum: [document_review, off_catalog_order] }
+        reason: { enum: [document_review, off_catalog_order, instruction_failed, payment_deferral] }
         status: { enum: [queued, in_progress, resolved] }
         created_at: { type: string, format: date-time }
     QueueItem:
@@ -207,6 +212,29 @@ components:
           required: [session_id]
           properties:
             session_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+    SalesContext:
+      type: object
+      required: [offer, quote]
+      properties:
+        offer:
+          oneOf:
+            - $ref: './public.openapi.yaml#/components/schemas/OfferCard'
+            - type: 'null'
+        quote:
+          oneOf:
+            - type: object
+              required: [quote_id, quantity, approved]
+              properties:
+                quote_id: { $ref: './public.openapi.yaml#/components/schemas/Uuid' }
+                quantity: { type: integer, minimum: 1 }
+                approved: { type: boolean }
+                discount_percent: { type: string }
+                agreed_total: { type: [string, 'null'] }
+                price:
+                  oneOf:
+                    - $ref: './public.openapi.yaml#/components/schemas/Price'
+                    - type: 'null'
+            - type: 'null'
     FaqApproval:
       type: object
       required: [question, answer, source_id]

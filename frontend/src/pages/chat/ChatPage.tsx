@@ -137,8 +137,16 @@ export function ChatView({ state, controller, mock = false, embedded = false, au
         </section>}
         {state.updatedOffer && <section className="updated-offer"><h2>Обновлённое предложение</h2><OfferCard offer={state.updatedOffer} selected={false} disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
         {selected && !selectedInHistory && <section className="updated-offer"><h2>Выбранное предложение</h2><OfferCard offer={selected} selected disabled={!!busy} onSelect={(card) => void controller.select(card)} /></section>}
+        {state.session?.price_terms && <div className="conversation-actions">
+          <p>За позицию: {state.session.price_terms.base_amount} {state.session.price_terms.currency}
+            {' · '}Скидка {state.session.price_terms.discount_percent}%
+            {' · '}Итого {state.session.price_terms.final_amount} {state.session.price_terms.currency}</p>
+        </div>}
         {state.session && messages.length > 0 && state.session.quotes_enabled && selected && !busy && <div className="conversation-actions">
           <QuoteDraftAction key={`${state.session.session_id}:${selected.offer_id}:${selected.catalog_version}:${state.session.last_turn?.turn_id}`} sessionId={state.session.session_id} demo={mock} onRefresh={() => void controller.recover()} onOfferChanged={controller.showUpdatedOffer} />
+        </div>}
+        {state.session?.support_topic && !busy && <div className="conversation-actions">
+          <button type="button" className="quiet-action" onClick={() => void controller.send('Не помогло')}>Не помогло</button>
         </div>}
         <AutomaticHandoffNotice notice={automaticHandoff} />
         {handoffIssue && <p className="handoff-sync-issue muted" role="status">{handoffIssue}</p>}

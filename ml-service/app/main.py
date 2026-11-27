@@ -139,6 +139,7 @@ async def interpret(
         updates=updates,
         clarification_candidates=interpretation.clarification_candidates,
         model_version=provider.model_version,
+        signals=[s for s in interpretation.signals if s.evidence in body.text],
     )
 
 

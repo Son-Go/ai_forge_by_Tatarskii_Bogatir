@@ -2,6 +2,9 @@ package ru.softline.support.chat;
 
 import static ru.softline.support.chat.ChatTypes.*;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
@@ -18,11 +21,13 @@ class ManagerStore {
     private final JdbcClient db;
     private final ChatStore chat;
     private final FaqStore faq;
+    private final ObjectMapper json;
 
-    ManagerStore(JdbcClient db, ChatStore chat, FaqStore faq) {
+    ManagerStore(JdbcClient db, ChatStore chat, FaqStore faq, ObjectMapper json) {
         this.db = db;
         this.chat = chat;
         this.faq = faq;
+        this.json = json;
     }
 
     List<QueueItem> list(String manager, int limit, int offset) {
@@ -35,7 +40,8 @@ class ManagerStore {
     @Transactional
     public AssignedHandoff read(UUID id, String manager) {
         Assigned assigned = lockAssigned(id, manager);
-        return new AssignedHandoff(assigned.item(), chat.messages(assigned.item().sessionId(), assigned.throughOrdinal()));
+        return new AssignedHandoff(assigned.item(), chat.messages(assigned.item().sessionId(), assigned.throughOrdinal()),
+                assigned.salesContext());
     }
 
     @Transactional
@@ -119,7 +125,8 @@ class ManagerStore {
         return db.sql("SELECT * FROM chat_handoffs WHERE handoff_id = ? AND manager_id = ?")
                 .params(id, manager).query((rs, row) -> {
                     Long closedAt = rs.getObject("closed_at_ordinal", Long.class);
-                    return new Assigned(item(rs, row), closedAt == null ? Long.MAX_VALUE : closedAt);
+                    return new Assigned(item(rs, row), closedAt == null ? Long.MAX_VALUE : closedAt,
+                            salesContext(rs.getString("sales_context")));
                 }).optional().orElseThrow(ManagerStore::missing);
     }
 
@@ -147,6 +154,15 @@ class ManagerStore {
                 rs.getString("reason"), rs.getString("status"), rs.getObject("created_at", OffsetDateTime.class).toInstant());
     }
 
+    private JsonNode salesContext(String value) {
+        if (value == null) return null;
+        try {
+            return json.readTree(value);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Invalid saved sales context", e);
+        }
+    }
+
     private record Assignment(QueueItem item, String manager) {}
-    private record Assigned(QueueItem item, long throughOrdinal) {}
+    private record Assigned(QueueItem item, long throughOrdinal, JsonNode salesContext) {}
 }

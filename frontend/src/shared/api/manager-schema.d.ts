@@ -200,7 +200,7 @@ export interface components {
         Handoff: {
             handoff_id: components["schemas"]["Uuid"];
             /** @enum {unknown} */
-            reason: "document_review" | "off_catalog_order";
+            reason: "document_review" | "off_catalog_order" | "instruction_failed" | "payment_deferral";
             /** @enum {unknown} */
             status: "queued" | "in_progress" | "resolved";
             /** Format: date-time */
@@ -208,6 +208,17 @@ export interface components {
         };
         QueueItem: components["schemas"]["Handoff"] & {
             session_id: components["schemas"]["Uuid"];
+        };
+        SalesContext: {
+            offer: components["schemas"]["OfferCard"] | null;
+            quote: {
+                quote_id: components["schemas"]["Uuid"];
+                quantity: number;
+                approved: boolean;
+                discount_percent?: string;
+                agreed_total?: string | null;
+                price?: components["schemas"]["Price"] | null;
+            } | null;
         };
         FaqApproval: {
             question: string;
@@ -255,6 +266,8 @@ export interface components {
             price: components["schemas"]["Price"] | null;
             /** @enum {unknown} */
             availability: "available" | "unavailable" | "unknown";
+            /** @description Сервер разрешает выбрать позицию. Позиция со статусом unavailable доступна для выбора при подтверждённой цене. */
+            selectable?: boolean;
             attributes: Record<string, never>;
             source_ids: string[];
         };
@@ -400,6 +413,8 @@ export interface operations {
                 content: {
                     "application/json": {
                         handoff: components["schemas"]["QueueItem"];
+                        /** @description Снимок выбранной позиции и версии КП на момент передачи просьбы об отсрочке. */
+                        sales_context?: components["schemas"]["SalesContext"] | null;
                         messages: components["schemas"]["ChatMessage"][];
                     };
                 };

@@ -1,6 +1,6 @@
 import type { components, operations } from './manager-schema'
 import { requireOk, jsonRequest } from './client'
-import { isMessage } from './guards'
+import { isMessage, isOffer, isPrice } from './guards'
 import type { Session } from './types'
 
 export type Handoff = components['schemas']['Handoff']
@@ -9,16 +9,24 @@ export type ManagerReplyInput = operations['replyToHandoff']['requestBody']['con
 export type FaqCandidate = components['schemas']['FaqCandidate']
 export type FaqApproval = components['schemas']['FaqApproval']
 export interface FaqReview { candidate: FaqCandidate | null }
-export interface AssignedHandoff { handoff: QueueItem; messages: Session['messages'] }
+export interface AssignedHandoff {
+  handoff: QueueItem; messages: Session['messages']; sales_context?: components['schemas']['SalesContext'] | null
+}
 export const managerQueuePageSize = 50
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const uuid = (v: unknown) => typeof v === 'string' && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(v)
 export function isHandoff(v: unknown): v is Handoff {
-  return record(v) && uuid(v.handoff_id) && ['document_review', 'off_catalog_order'].includes(String(v.reason))
+  return record(v) && uuid(v.handoff_id) && ['document_review', 'off_catalog_order', 'instruction_failed', 'payment_deferral'].includes(String(v.reason))
     && ['queued', 'in_progress', 'resolved'].includes(String(v.status)) && typeof v.created_at === 'string' && Number.isFinite(Date.parse(v.created_at))
 }
 export const isQueueItem = (v: unknown): v is QueueItem => isHandoff(v) && 'session_id' in v && uuid(v.session_id)
+const isSalesContext = (v: unknown) => record(v) && (v.offer === null || isOffer(v.offer))
+  && (v.quote === null || (record(v.quote) && uuid(v.quote.quote_id) && Number.isInteger(v.quote.quantity)
+    && typeof v.quote.approved === 'boolean'
+    && (v.quote.discount_percent === undefined || typeof v.quote.discount_percent === 'string')
+    && optionalText(v.quote.agreed_total) && (v.quote.price == null || isPrice(v.quote.price))))
 export const isAssignedHandoff = (v: unknown): v is AssignedHandoff => record(v) && isQueueItem(v.handoff)
+  && (v.sales_context == null || isSalesContext(v.sales_context))
   && Array.isArray(v.messages) && v.messages.every((message) => isMessage(message) && message.status !== undefined)
 
 const faqStatuses = ['queued', 'published', 'needs_review', 'case_specific', 'rejected', 'unpublished']

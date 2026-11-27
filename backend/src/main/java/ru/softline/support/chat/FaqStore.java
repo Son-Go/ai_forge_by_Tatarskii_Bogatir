@@ -39,7 +39,8 @@ class FaqStore {
     void enqueue(UUID handoff) {
         db.sql("""
             WITH replies AS (
-                SELECT m.*, count(*) FILTER (WHERE role = 'user') OVER () AS questions,
+                SELECT m.*, h.reason NOT IN ('instruction_failed', 'payment_deferral') AS eligible,
+                    count(*) FILTER (WHERE role = 'user') OVER () AS questions,
                     count(*) FILTER (WHERE role = 'assistant' AND turn_id IS NULL) OVER () AS answers
                 FROM chat_messages m JOIN chat_handoffs h USING (handoff_id)
                 WHERE h.handoff_id = ? AND m.session_id = h.session_id
@@ -48,7 +49,7 @@ class FaqStore {
                 SELECT * FROM replies WHERE role = 'assistant' AND turn_id IS NULL ORDER BY ordinal DESC LIMIT 1
             ), pair AS (
                 SELECT a.message_id AS answer_id, a.handoff_id, q.message_id AS question_id,
-                    (a.questions = 1 AND a.answers = 1 AND q.message_id IS NOT NULL) AS unambiguous
+                    (a.eligible AND a.questions = 1 AND a.answers = 1 AND q.message_id IS NOT NULL) AS unambiguous
                 FROM answer a LEFT JOIN LATERAL (
                     SELECT message_id FROM replies
                     WHERE role = 'user' AND ordinal < a.ordinal ORDER BY ordinal DESC LIMIT 1

@@ -31,7 +31,7 @@ final class CommercialProposalPdf {
         List<List<String>> labels = cells(font, "Артикул", "Наименование", "Кол-во",
                 "Цена, " + currency, "Сумма, " + currency, "В т. ч. НДС, " + currency);
         List<List<String>> item = cells(font, draft.vendorCode().isBlank() ? "—" : draft.vendorCode(),
-                draft.name(), Integer.toString(draft.quantity()), amount(draft.unitPrice()),
+                draft.name(), Integer.toString(draft.quantity()), amount(draft.discountedUnitPrice()),
                 amount(draft.total()), "Уточняется");
         List<List<String>> total = cells(font, "", "Итого", "", "", amount(draft.total()), "Уточняется");
         int itemLines = linesIn(item);
@@ -49,6 +49,11 @@ final class CommercialProposalPdf {
                 y = row(stream, font, item, y, offset, count, false);
                 if (offset + count == itemLines) {
                     y = row(stream, font, total, y, 0, linesIn(total), false);
+                    if (draft.discountPercent().signum() > 0) {
+                        text(stream, font, "Базовая сумма: " + amount(draft.originalTotal()) + " " + currency
+                                + " · Скидка: " + amount(draft.discountPercent()) + "%", 9, 78, y - 15, 450, false);
+                        y -= 18;
+                    }
                     writeTerms(stream, font, y - 22);
                 }
                 drawArtwork(stream, footer, (PDRectangle.A4.getWidth() - 378) / 2, 22, 378);
