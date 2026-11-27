@@ -14,7 +14,6 @@ from pydantic import BaseModel
 
 from .config import Settings
 from .errors import InvalidModelOutput, ServiceError, validate_model_json
-from .schemas import Interpretation
 from .telemetry import RunpodCall, Stage
 
 logger = logging.getLogger("uvicorn.error").getChild("runpod")
@@ -78,7 +77,7 @@ class RunpodClient:
             call.record()
 
     def payload(
-        self, system_prompt: str, user_payload: str, *, stream: bool, compose: bool = False
+        self, system_prompt: str, user_payload: str, *, stream: bool, max_tokens: int
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.settings.runpod_model,
@@ -89,18 +88,10 @@ class RunpodClient:
             "stream": stream,
             "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False},
-            "max_tokens": 1_024 if compose else 768,
+            "max_tokens": max_tokens,
         }
         if stream:
             body["stream_options"] = {"include_usage": True}
-        elif not compose and self.settings.runpod_response_format == "json_schema":
-            body["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "interpretation",
-                    "schema": Interpretation.model_json_schema(),
-                },
-            }
         return body
 
     @staticmethod
@@ -157,11 +148,15 @@ class RunpodClient:
                 response.raise_for_status()
                 data = self.job_data(response)
         finally:
-            if data["status"] in PENDING:
+            cancel_budget = 2.0
+            if call.stage == "faq_review":
+                # The caller may retry as soon as the deadline expires. The job has a TTL.
+                cancel_budget = min(cancel_budget, deadline - asyncio.get_running_loop().time())
+            if data["status"] in PENDING and cancel_budget > 0:
                 # A disconnected turn has no consumer. Cancel only its confirmed job.
                 with CancelScope(shield=True):
                     try:
-                        async with asyncio.timeout(2):
+                        async with asyncio.timeout(cancel_budget):
                             await self.http.post(f"cancel/{job_id}", headers=headers)
                     except (httpx.HTTPError, TimeoutError):
                         pass
@@ -182,11 +177,24 @@ class RunpodClient:
             raise ServiceError("MODEL_UNAVAILABLE", "RunPod не смог обработать запрос.")
         return content, job_id
 
-    async def interpret(
-        self, system_prompt: str, user_payload: str, call: RunpodCall, deadline: float
-    ) -> Interpretation:
+    async def complete[Output: BaseModel](
+        self,
+        system_prompt: str,
+        user_payload: str,
+        call: RunpodCall,
+        deadline: float,
+        *,
+        schema: type[Output],
+        schema_name: str,
+        max_tokens: int,
+    ) -> Output:
         request_id = call.request_id
-        payload = self.payload(system_prompt, user_payload, stream=False)
+        payload = self.payload(system_prompt, user_payload, stream=False, max_tokens=max_tokens)
+        if self.settings.runpod_response_format == "json_schema":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": schema.model_json_schema()},
+            }
         started = perf_counter()
         with translate_runpod_errors(request_id):
             async with asyncio.timeout_at(deadline), self.slots:
@@ -204,10 +212,14 @@ class RunpodClient:
                     response.raise_for_status()
                     provider_id = response.headers.get("x-request-id", "")[:128]
                 result = validate_model_json(
-                    Interpretation, self.completion_text(content), "interpretation_schema"
+                    schema,
+                    self.completion_text(content),
+                    f"{schema_name}_schema",
+                    reject_duplicate_keys=call.stage == "faq_review",
                 )
         logger.info(
-            "Runpod interpret request_id=%s provider_id=%r elapsed_ms=%.0f",
+            "Runpod %s request_id=%s provider_id=%r elapsed_ms=%.0f",
+            call.stage,
             request_id,
             provider_id,
             (perf_counter() - started) * 1_000,
@@ -219,7 +231,7 @@ class RunpodClient:
     ) -> AsyncGenerator[str, None]:
         request_id = call.request_id
         if self.settings.runpod_request_mode == "queue":
-            payload = self.payload(system_prompt, user_payload, stream=False, compose=True)
+            payload = self.payload(system_prompt, user_payload, stream=False, max_tokens=1_024)
             with translate_runpod_errors(request_id):
                 async with asyncio.timeout_at(deadline), self.slots:
                     call.started = True
@@ -227,7 +239,7 @@ class RunpodClient:
                     text = self.completion_text(content)
             yield text
             return
-        payload = self.payload(system_prompt, user_payload, stream=True, compose=True)
+        payload = self.payload(system_prompt, user_payload, stream=True, max_tokens=1_024)
         started = perf_counter()
         resources = AsyncExitStack()
         validation_error = None

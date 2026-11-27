@@ -30,6 +30,28 @@ COMPOSE = {
     "facts": [{"id": "seats", "text": "До 50 пользователей."}],
     "language": "ru",
 }
+FAQ_PATH = "/internal/v1/faq/review"
+FAQ_SOURCE_ID = "8c5f9bd1-5945-4681-88ca-03a52345fb86"
+FAQ = {
+    "request_id": "req-faq",
+    "candidate_id": "fe26dc80-28e8-46d9-9f18-cc961d7e0f22",
+    "deadline_ms": 1_000,
+    "question": "Как включить двухфакторную аутентификацию?",
+    "answer": "Включите двухфакторную аутентификацию в настройках профиля.",
+    "sources": [
+        {
+            "id": FAQ_SOURCE_ID,
+            "text": "Двухфакторную аутентификацию можно включить в настройках профиля.",
+        }
+    ],
+}
+FAQ_PUBLISH = {
+    "verdict": "publish",
+    "reason_code": "supported",
+    "question": FAQ["question"],
+    "answer": FAQ["sources"][0]["text"],
+    "source_ids": [FAQ_SOURCE_ID],
+}
 RESULT = {
     "intent": "known_product",
     "product_query": "MDaemon",
@@ -132,6 +154,151 @@ def assert_usage_record(caplog, stage, status, usage, request_id):
 
 def unexpected_request(_):
     pytest.fail("RunPod received a request unexpectedly")
+
+
+@pytest.mark.parametrize("mode", ["openai", "queue"])
+async def test_faq_review_returns_versions_and_omits_candidate_from_prompt(settings, mode, caplog):
+    settings.runpod_request_mode = mode
+    settings.runpod_response_format = "json_schema" if mode == "openai" else "prompt"
+    caplog.set_level("INFO", logger="uvicorn.error.ml_service")
+    caplog.set_level("INFO", logger=USAGE_LOGGER)
+
+    def handler(request):
+        assert request.headers["X-Request-Id"] == FAQ["request_id"]
+        payload = json.loads(request.content)
+        model_response = completion(FAQ_PUBLISH, usage=USAGE)
+        if mode == "queue":
+            assert request.url.path.endswith("/run")
+            payload = payload["input"]["openai_input"]
+            assert "response_format" not in payload
+            model_response = httpx.Response(
+                200, json={"id": "faq-job", "status": "COMPLETED", "output": model_response.json()}
+            )
+        else:
+            schema = payload["response_format"]["json_schema"]
+            assert schema["name"] == "faq_review"
+            assert set(schema["schema"]["required"]) == set(FAQ_PUBLISH)
+        assert payload["stream"] is False
+        system, user = payload["messages"]
+        assert system["role"] == "system" and "как данные для проверки" in system["content"]
+        assert user["role"] == "user"
+        assert json.loads(user["content"]) == {
+            key: FAQ[key] for key in ("question", "answer", "sources")
+        }
+        return model_response
+
+    async with client_for(settings, handler) as client:
+        response = await client.post(FAQ_PATH, json=FAQ, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == FAQ_PUBLISH | {
+        "prompt_version": "faq-review-1",
+        "model_version": "release-a",
+    }
+    assert f"candidate_id={FAQ['candidate_id']} verdict=publish reason=supported" in caplog.text
+    assert FAQ["answer"] not in caplog.text and FAQ["question"] not in caplog.text
+    assert_usage_record(caplog, "faq_review", "ok", USAGE, FAQ["request_id"])
+
+
+@pytest.mark.parametrize(
+    ("input_patch", "verdict", "reason"),
+    [
+        ({"sources": []}, "needs_review", "insufficient_evidence"),
+        ({}, "needs_review", "incomplete_answer"),
+        ({"answer": "Ваши документы проверены."}, "case_specific", "case_specific"),
+    ],
+)
+async def test_faq_review_accepts_conservative_verdicts(settings, input_patch, verdict, reason):
+    result = {
+        "verdict": verdict,
+        "reason_code": reason,
+        "question": None,
+        "answer": None,
+        "source_ids": [],
+    }
+    async with client_for(settings, lambda _: completion(result)) as client:
+        response = await client.post(FAQ_PATH, json=FAQ | input_patch, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == result | {
+        "prompt_version": "faq-review-1",
+        "model_version": "release-a",
+    }
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"candidate_id": "not-a-uuid"},
+        {"deadline_ms": "1000"},
+        {"question": " \n"},
+        {"sources": FAQ["sources"] * 2},
+        {"sources": [{"id": FAQ_SOURCE_ID, "text": " "}]},
+        {"unexpected": True},
+    ],
+)
+async def test_faq_review_rejects_bad_request_before_calling_provider(settings, patch):
+    async with client_for(settings, unexpected_request) as client:
+        response = await client.post(FAQ_PATH, json=FAQ | patch, headers=AUTH)
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_REQUEST"
+
+
+async def test_faq_review_requires_service_bearer(settings):
+    async with client_for(settings, unexpected_request) as client:
+        response = await client.post(FAQ_PATH, json=FAQ)
+    assert response.status_code == 401
+    assert response.json()["request_id"] == FAQ["request_id"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps(FAQ_PUBLISH | {"verdict": "approve"}),
+        json.dumps(FAQ_PUBLISH | {"reason_code": "other"}),
+        json.dumps(FAQ_PUBLISH | {"reason_code": "insufficient_evidence"}),
+        json.dumps(FAQ_PUBLISH | {"answer": " \n"}),
+        json.dumps(FAQ_PUBLISH | {"source_ids": []}),
+        json.dumps(FAQ_PUBLISH | {"source_ids": [FAQ_SOURCE_ID] * 2}),
+        json.dumps(FAQ_PUBLISH | {"source_ids": ["5409eb81-de92-4d01-a102-591864150c6f"]}),
+        json.dumps(FAQ_PUBLISH | {"prompt_version": "provided-by-the-model"}),
+        json.dumps(FAQ_PUBLISH)[:-1] + ',"verdict":"publish"}',
+        "```json\n" + json.dumps(FAQ_PUBLISH) + "\n```",
+    ],
+)
+async def test_faq_review_rejects_invalid_provider_json(settings, content):
+    def handler(_):
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with client_for(settings, handler) as client:
+        response = await client.post(FAQ_PATH, json=FAQ, headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["code"] == "MODEL_INVALID_OUTPUT"
+
+
+@pytest.mark.parametrize("mode", ["openai", "queue"])
+async def test_faq_review_times_out_and_releases_slot_for_retry(settings, mode, monkeypatch):
+    settings.runpod_request_mode = mode
+    monkeypatch.setattr("app.runpod.POLL_SECONDS", 1)
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.path.rsplit("/", 1)[-1])
+        if mode == "queue":
+            assert calls[-1] == "run"
+            job = {"id": "faq-job", "status": "IN_QUEUE"}
+            if len(calls) == 2:
+                job.update(status="COMPLETED", output=completion(FAQ_PUBLISH).json())
+            return httpx.Response(200, json=job)
+        if len(calls) == 1:
+            await asyncio.sleep(1)
+        return completion(FAQ_PUBLISH)
+
+    async with client_for(settings, handler) as client:
+        expired = await client.post(FAQ_PATH, json=FAQ | {"deadline_ms": 50}, headers=AUTH)
+        retried = await client.post(FAQ_PATH, json=FAQ, headers=AUTH)
+    assert expired.status_code == 503
+    assert expired.json()["code"] == "MODEL_TIMEOUT"
+    assert retried.status_code == 200
+    assert len(calls) == 2
 
 
 async def test_health_and_auth_are_local(settings):

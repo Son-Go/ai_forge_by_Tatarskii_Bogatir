@@ -29,7 +29,11 @@ from .schemas import (
     Complete,
     ComposeRequest,
     Error,
+    FaqReview,
+    FaqReviewRequest,
+    FaqReviewResult,
     Health,
+    Interpretation,
     InterpretRequest,
     InterpretResult,
     ModelRequest,
@@ -79,7 +83,9 @@ router = APIRouter(
 
 
 def model_payload(body: ModelRequest, provider: RunpodClient) -> str:
-    payload = body.model_dump_json(by_alias=True, exclude={"request_id", "deadline_ms"})
+    payload = body.model_dump_json(
+        by_alias=True, exclude={"request_id", "deadline_ms", "candidate_id"}
+    )
     if len(payload.encode("utf-8")) > provider.settings.ml_max_context_bytes:
         raise ServiceError("CONTEXT_TOO_LARGE", "Контекст запроса слишком большой.", 400)
     return payload
@@ -108,8 +114,14 @@ async def interpret(
 ) -> InterpretResult:
     deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
     with provider.call("interpret", body.request_id) as call:
-        interpretation = await provider.interpret(
-            prompts.INTERPRET, model_payload(body, provider), call, deadline
+        interpretation = await provider.complete(
+            prompts.INTERPRET,
+            model_payload(body, provider),
+            call,
+            deadline,
+            schema=Interpretation,
+            schema_name="interpretation",
+            max_tokens=768,
         )
         updates: list[ClearUpdate | SetOperation] = []
         for update in interpretation.updates:
@@ -128,6 +140,50 @@ async def interpret(
         clarification_candidates=interpretation.clarification_candidates,
         model_version=provider.model_version,
     )
+
+
+@router.post("/faq/review", operation_id="reviewFaq")
+async def review_faq(body: FaqReviewRequest, provider: Runpod) -> FaqReviewResult:
+    started = perf_counter()
+    deadline = make_deadline(body.deadline_ms, provider.settings.model_deadline_limit_ms)
+    verdict = None
+    reason = "cancelled"
+    try:
+        with provider.call("faq_review", body.request_id) as call:
+            review = await provider.complete(
+                prompts.FAQ_REVIEW,
+                model_payload(body, provider),
+                call,
+                deadline,
+                schema=FaqReview,
+                schema_name="faq_review",
+                max_tokens=2_048,
+            )
+            allowed_sources = {source.id for source in body.sources}
+            if not allowed_sources.issuperset(review.source_ids):
+                raise InvalidModelOutput("invalid_faq_source_references")
+            try:
+                result = FaqReviewResult(
+                    **review.model_dump(),
+                    prompt_version=prompts.FAQ_REVIEW_VERSION,
+                    model_version=call.model_version,
+                )
+            except ValidationError:
+                raise ServiceError("ML_NOT_CONFIGURED", "Некорректная версия модели.") from None
+            call.succeeded = True
+        verdict, reason = result.verdict, result.reason_code
+        return result
+    except ServiceError as error:
+        reason = error.code
+        raise
+    finally:
+        logger.info(
+            "FAQ review candidate_id=%s verdict=%s reason=%s elapsed_ms=%.0f",
+            body.candidate_id,
+            verdict,
+            reason,
+            (perf_counter() - started) * 1_000,
+        )
 
 
 def parse_block(line: str, fact_ids: set[str], facts_required: bool) -> Block:
