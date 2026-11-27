@@ -1,5 +1,6 @@
 """Evaluate the configured model via FastAPI using only synthetic conversations."""
 
+import argparse
 import asyncio
 import json
 from uuid import uuid4
@@ -64,7 +65,7 @@ COMPOSE_CASES = [
 ]
 
 
-async def evaluate() -> int:
+async def evaluate(cold_deadline_ms: int) -> int:
     settings = Settings()
     if settings.ml_service_token is None:
         print("ML_SERVICE_TOKEN is missing")
@@ -82,10 +83,11 @@ async def evaluate() -> int:
             print("The configured model profile is not ready")
             return 1
 
-        cold_deadline_ms = min(settings.model_deadline_limit_ms, 300_000)
+        cold_deadline_ms = min(settings.model_deadline_limit_ms, cold_deadline_ms)
         print(
             f"Running synthetic cases: model={settings.runpod_model_version}, "
-            f"mode={settings.runpod_request_mode}, format={settings.runpod_response_format}"
+            f"mode={settings.runpod_request_mode}, format={settings.runpod_response_format}, "
+            f"cold_deadline_ms={cold_deadline_ms}"
         )
         for index, (label, utterance, history, expected) in enumerate(INTERPRET_CASES):
             response = await client.post(
@@ -149,4 +151,9 @@ async def evaluate() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(evaluate()))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cold-deadline-ms", type=int, default=300_000)
+    args = parser.parse_args()
+    if args.cold_deadline_ms < 1:
+        parser.error("--cold-deadline-ms must be positive")
+    raise SystemExit(asyncio.run(evaluate(args.cold_deadline_ms)))

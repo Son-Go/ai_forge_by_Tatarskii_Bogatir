@@ -16,8 +16,12 @@ Spring Boot вызывает FastAPI по адресу `http://ml-service:8000` 
 Из корня репозитория запустите сценарии поддержки, возражения о цене, отсрочки и композиции подтверждённых фактов. Скрипт передаёт настроенному профилю из `.env` только синтетические реплики и факты.
 
 ```bash
-PYTHONPATH=ml-service uv run --project ml-service --env-file .env python ml-service/tests/live_clarifications.py
+PYTHONPATH=ml-service uv run --locked --project ml-service --env-file .env python ml-service/tests/live_clarifications.py
 ```
+
+В режиме очереди при долгом холодном старте добавьте `--cold-deadline-ms 600000`.
+Лимит режима вызова применяется и к этому параметру. Отчёт содержит версию модели,
+режим и формат вызова, а для каждого успешного ответа — версию промпта.
 
 ## Профиль RunPod
 
