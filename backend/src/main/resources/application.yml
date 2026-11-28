@@ -47,5 +47,6 @@ faq:
 ml:
   base-url: ${ML_BASE_URL:}
   data-region: ${ML_DATA_REGION:}
+  data-scope: ${ML_DATA_SCOPE:}
   service-token: ${ML_SERVICE_TOKEN:}
   max-context-bytes: ${ML_MAX_CONTEXT_BYTES:24000}

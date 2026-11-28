@@ -23,6 +23,12 @@ curl --fail http://localhost:8080/health/live
 
 Для полного модельного сценария нужны активный каталог и подключение Spring Boot к FastAPI. В подтверждённом российском контуре задайте `ML_BASE_URL=http://ml-service:8000` и `ML_DATA_REGION=RU`. Оба сервиса получают один `ML_SERVICE_TOKEN` из корневого `.env`. Для импорта каталога укажите `CATALOG_FEED_URL` либо смонтируйте файл в контейнер backend и укажите путь через `CATALOG_FEED_FILE`. [Архитектура](../ARCHITECTURE.md) · [Настройки бэкенда](../backend/README.md)
 
+Для демонстрационного стенда в Нидерландах добавьте [`infra/vps-nl.env`](vps-nl.env) после серверного `.env` при запуске Compose. Он задаёт регион `NL`, область данных `public-synthetic`, режим очереди RunPod и бюджет хода 20 минут. Храните пароли, ключи, идентификатор эндпоинта и параметры публичных адресов в серверном `.env`. Используйте отдельную базу с публичным каталогом и синтетической историей чата.
+
+```sh
+docker compose -p forge-live-check --env-file .env --env-file infra/vps-nl.env config --quiet
+```
+
 Конфигурация по умолчанию слушает loopback. Если локально используются оба адреса, задайте `CHAT_PUBLIC_ORIGIN=http://localhost:8080,http://127.0.0.1:8080`, подставив порт стенда. Для публичного стенда задайте домен в `SITE_ADDRESS`, адрес привязки VPS в `EDGE_BIND`, порты 80 и 443 и точный HTTPS-origin в `CHAT_PUBLIC_ORIGIN`.
 
 ## Мониторинг расхода токенов

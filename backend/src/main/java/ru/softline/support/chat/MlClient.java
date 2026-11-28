@@ -47,6 +47,7 @@ class MlClient {
 
     MlClient(ObjectMapper json, @Value("${ml.base-url:}") String url,
              @Value("${ml.service-token:}") String token, @Value("${ml.data-region:}") String region,
+             @Value("${ml.data-scope:}") String dataScope,
              @Value("${ml.max-context-bytes:24000}") int maxContextBytes) {
         this.json = json;
         this.token = token;
@@ -55,9 +56,11 @@ class MlClient {
             throw new IllegalArgumentException("ML context budget must be between 4000 and 100000 bytes");
         }
         this.maxContextBytes = maxContextBytes;
-        if (base != null && (!"RU".equals(region) || token.isBlank() || base.getHost() == null
+        boolean supportedRegion = "RU".equals(region) || ("NL".equals(region) && "public-synthetic".equals(dataScope));
+        if (base != null && (!supportedRegion || token.isBlank() || base.getHost() == null
                 || !List.of("http", "https").contains(base.getScheme()) || base.getUserInfo() != null)) {
-            throw new IllegalArgumentException("ML requires a Russian deployment, an HTTP service address and a service token");
+            throw new IllegalArgumentException(
+                    "ML requires region RU or NL with public-synthetic data scope, an HTTP service address and a service token");
         }
     }
 
