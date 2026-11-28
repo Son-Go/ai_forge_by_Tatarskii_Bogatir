@@ -61,7 +61,7 @@ python3 backend/tests/sse_timeout.py --jdbc-url jdbc:postgresql://127.0.0.1:5432
 
 Кандидат создаётся при закрытии обращения с ответом. Состояние доступно через `GET /api/v1/manager/handoffs/{handoff_id}/faq`, в том числе с параметром `source_query` для поиска актуальной выдержки. Действия `approve`, `reject` и `unpublish` принимают тот же менеджерский Bearer-токен. [Контракт кабинета](../contracts/manager.openapi.yaml)
 
-В `infra/.env.example` фоновая проверка включена через `FAQ_REVIEW_ENABLED=true` для Compose со связкой Java и FastAPI. При запуске с собственным `.env` включите этот флаг и проверьте доступность `POST /internal/v1/faq/review` с сервисным токеном. Бюджет одного вызова задаётся `FAQ_REVIEW_TIMEOUT_MS` и по умолчанию равен 30 секундам. Java делает до трёх попыток с паузами в одну и две минуты. [Контракт Java ↔ FastAPI](../contracts/internal.openapi.yaml)
+В Compose фоновая проверка включается при заданном `ML_BASE_URL`. Чтобы отключить её, задайте `FAQ_REVIEW_ENABLED=false` в окружении стека. При запуске Java напрямую включите `FAQ_REVIEW_ENABLED=true` после подключения FastAPI. Бюджет одного вызова задаётся `FAQ_REVIEW_TIMEOUT_MS` и по умолчанию равен 30 секундам. Java делает до трёх попыток с паузами в одну и две минуты. [Контракт Java ↔ FastAPI](../contracts/internal.openapi.yaml)
 
 Для сквозной проверки соберите JAR и запустите `python3 backend/tests/faq_review.py --compose-file /tmp/faq/compose.yaml`. Используйте отдельный пустой PostgreSQL 17 в сервисе `postgres` с портом `127.0.0.1::5432`, БД и пользователем `faq_check`, тестовым паролем `faq_check_fixture`. Сценарий запускает собственную Java и HTTP-подмену FastAPI.
 
